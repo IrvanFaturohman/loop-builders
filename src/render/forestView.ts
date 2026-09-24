@@ -60,6 +60,8 @@ export class ForestView {
   private readonly anims = new Map<number, CellAnim>();
   private readonly dirty = new Set<number>();
   private first = true;
+  /** Pita di bawah indeks ini sudah menjadi lahan kota (tunggulnya disembunyikan). */
+  private cityStage = 0;
 
   constructor(levelIndex: number, soilColor: string) {
     const f = fieldFor(levelIndex);
@@ -163,7 +165,8 @@ export class ForestView {
     this.meshes[k].setMatrixAt(this.slot[c], _m);
     this.meshes[k].instanceMatrix.needsUpdate = true;
     // tunggul terlihat saat blok sudah ditebang (dan tunas masih kecil)
-    const stump = hp === 0 && !(anim?.kind === 'fall' && anim.t > 0.2);
+    // Tunggul hilang begitu lahannya menjadi kota (pita di dalam rel sekarang).
+    const stump = hp === 0 && this.field.band[c] >= this.cityStage && !(anim?.kind === 'fall' && anim.t > 0.2);
     _p.set(f.x[c] + jx, 0, f.z[c] - jx * 0.6);
     _q.setFromAxisAngle(_s.set(0, 1, 0), rot);
     _s.setScalar(stump ? js : 0.0001);
@@ -207,6 +210,13 @@ export class ForestView {
     for (const c of this.dirty) this.writeCell(c, state);
     this.dirty.clear();
     return felled;
+  }
+
+  /** Dipanggil World saat tanah kota tumbuh (setelah morph rel). */
+  setCityStage(stage: number): void {
+    if (stage === this.cityStage) return;
+    this.cityStage = stage;
+    for (let c = 0; c < this.field.n; c++) if (this.field.kind[c] >= 0) this.dirty.add(c);
   }
 
   dispose(): void {

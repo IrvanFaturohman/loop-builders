@@ -188,13 +188,13 @@ export class Hud {
     else {
       const dp = plots.filter((p) => p.district === band);
       const done = dp.filter((p) => isPlotComplete(state, p.index)).length;
-      stage = `<b>${level.districts[band].name}</b> · ${done}/${dp.length} jadi · hutan ${bandPct}%`;
+      stage = `<b>${level.districts[band].name}</b> · ${done}/${dp.length} jadi${state.stock > 0 ? ` · gudang ${fmt(state.stock)}` : ''}`;
     }
     this.set('pstage', this.pStage, stage);
 
     // Hint (teks kecil, tidak memblokir)
     let hint = '';
-    if (!state.completed && rt.fullTime > 4) hint = 'Muatan penuh, pemotong berhenti — naikkan Kapasitas';
+    if (!state.completed && rt.fullTime > 4) hint = 'Muatan penuh — naikkan Kapasitas';
     this.set('hint', this.hintEl, hint);
     this.hintEl.hidden = hint === '';
 
@@ -227,17 +227,17 @@ export class Hud {
     this.priceBtn('speed', this.speedCostEl, this.btnSpeed, speedCost(state), canUpgradeSpeed(state).ok, locked);
     this.priceBtn('cap', this.capacityCostEl, this.btnCapacity, capacityCost(state), canUpgradeCapacity(state).ok, locked);
 
-    // Panel progres: rel melebar sendiri saat pita hutan bersih
+    // Panel progres: rel melebar sendiri saat pita hutan di luar rel bersih
     const N = stageCount(level);
     const last = band >= N - 1;
     this.set(
       'stinfo',
       this.stInfo,
-      `<div class="st-name">Cincin ${band + 1}/${N} · Kota ${Math.floor(cityProgress(state) * 100)}%</div><div class="st-meta">${last ? 'Tebang sisa hutan untuk menyelesaikan kota' : 'Rel melebar sendiri saat hutan di luar rel bersih'}</div>`,
+      `<div class="st-name">Cincin ${band + 1}/${N} · ${last ? 'cincin terakhir' : 'tebang hutan di luar rel'}</div>` +
+        `<div class="st-bar"><span class="track"><i style="width:${bandPct}%"></i></span>${last ? `Hutan ${bandPct}%` : `${bandPct}% → rel melebar`}</div>`,
     );
-    this.set('stx', this.stExpand, `Bersih<small>${Math.floor(forestCleared(state) * 100)}%</small>`);
-    this.cls(this.stExpand, 'max', true);
-    this.cls(this.stExpand, 'locked', false);
+    this.set('stx', this.stExpand, `Kota<small>${Math.floor(cityProgress(state) * 100)}%</small>`);
+    this.cls(this.stExpand, 'city', true);
 
     for (const [k, el] of Object.entries(this.targets())) this.cls(el, 'pulse', this.pulseTarget === k);
     if (this.toastTimer > 0) {
@@ -316,7 +316,7 @@ export class Hud {
     const level = levelDef(state);
     const b = buildingsDone(state);
     $('c-title').textContent = `${level.name} selesai!`;
-    const items = [`${b.total} bangunan berdiri`, `${fmt(state.stats.totalCut)} blok ditebang`, `Waktu ${fmtTime(state.stats.levelTime)}`, `Bonus ${coin(state.stats.lastCompletionBonus)}`];
+    const items = [`${b.total} bangunan berdiri`, `Pulau ${Math.round(forestCleared(state) * 100)}% bersih · ${fmt(state.stats.totalCut)} blok`, `Waktu ${fmtTime(state.stats.levelTime)}`, `Bonus ${coin(state.stats.lastCompletionBonus)}`];
     $('c-stats').innerHTML = items.map((t) => `<li>${t}</li>`).join('');
     const next = LEVELS[(state.levelIndex + 1) % LEVELS.length];
     $('btn-next').innerHTML = `Level Berikutnya<br><small style="font-size:12px;opacity:.9">${isLastLevel(state) ? 'Putaran baru · ' : ''}${next.name}</small>`;

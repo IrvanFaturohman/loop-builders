@@ -543,6 +543,36 @@ button {
 .st-info .st-meta.full {
   color: var(--red);
 }
+.st-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-weight: 700;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.st-bar .track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: #e3e9f0;
+  overflow: hidden;
+}
+.st-bar .track i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #7ccf4a, #4fb338);
+  transition: width 0.25s;
+}
+.st-action.city {
+  background: #fff3d6;
+  color: #8a5a00;
+  box-shadow: none;
+  pointer-events: none;
+}
 .st-action {
   min-width: 88px;
   padding: 8px 10px 9px;

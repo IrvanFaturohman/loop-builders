@@ -124,7 +124,7 @@ export class App {
     this.updateTutorial();
     const running = !this.state.completed && this.rt.freeze <= 0 && !document.hidden;
     this.sfx.setEngine(this.rt.boost.mult, running);
-    this.sfx.setSaw(running ? this.rt.cutHeat : 0);
+    this.sfx.setSaw(running ? this.rt.cutHeat : 0, this.rt.targets.filter((t) => t >= 0).length);
     this.sfx.tick(dt);
     this.world.render();
 

@@ -96,11 +96,15 @@ export interface ResolvedPlot {
   facing: Vec2;
 }
 
-/** Jalur tempat kavling distrik diletakkan (searah jarum jam dari tengah sisi bawah). */
+/** Cincin pada jarak bertanda `offset` dari rel pertama (searah jarum jam dari tengah sisi bawah). */
+export function ringPath(level: LevelDefinition, offset: number): TrackPath {
+  return new TrackPath(ringShape(level.ringStart + offset, Math.max(0.3, level.cornerRadius + offset)));
+}
+
+/** Jalur tempat kavling distrik diletakkan. */
 export function districtPath(level: LevelDefinition, district: number): TrackPath {
   if (district === 0) return new TrackPath(ringShape(CENTER_HALF, 0.3));
-  const o = railOffset(level, district - 1) + LOT_SHIFT;
-  return new TrackPath(ringShape(level.ringStart + o, level.cornerRadius + o));
+  return ringPath(level, railOffset(level, district - 1) + LOT_SHIFT);
 }
 
 const plotCache = new Map<number, ResolvedPlot[]>();

@@ -233,8 +233,8 @@ export class Sfx {
 
   private saw: { osc: OscillatorNode; gain: GainNode; filter: BiquadFilterNode } | null = null;
 
-  /** Dengung gergaji halus selama sedang menebang. */
-  setSaw(intensity: number): void {
+  /** Dengung gerinda selama memotong; makin banyak pemotong yang bekerja, makin tinggi & tebal. */
+  setSaw(intensity: number, active = 1): void {
     if (!this.ctx || !this.master || this.ctx.state !== 'running') return;
     if (!this.saw) {
       const osc = this.ctx.createOscillator();
@@ -243,7 +243,7 @@ export class Sfx {
       osc.type = 'sawtooth';
       osc.frequency.value = 190;
       filter.type = 'bandpass';
-      filter.frequency.value = 1400;
+      filter.frequency.value = 2100;
       filter.Q.value = 2;
       gain.gain.value = 0;
       osc.connect(filter);
@@ -253,8 +253,9 @@ export class Sfx {
       this.saw = { osc, gain, filter };
     }
     const t = this.ctx.currentTime;
-    this.saw.gain.gain.setTargetAtTime(this.muted ? 0 : Math.min(1, intensity) * 0.012, t, 0.08);
-    this.saw.osc.frequency.setTargetAtTime(170 + intensity * 60 + Math.random() * 8, t, 0.05);
+    const n = Math.min(6, active);
+    this.saw.gain.gain.setTargetAtTime(this.muted ? 0 : Math.min(1, intensity) * (0.009 + 0.002 * n), t, 0.08);
+    this.saw.osc.frequency.setTargetAtTime(290 + n * 22 + intensity * 40 + Math.random() * 10, t, 0.05);
   }
 
   modulePop(i: number): void {
