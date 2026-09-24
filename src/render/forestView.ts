@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BALANCE } from '../config/balance';
-import type { GameState } from '../game/types';
+import type { BlockKind, GameState } from '../game/types';
 import { fieldFor, KINDS, type Field } from '../game/worldgen';
 import { cbox, ccyl, colored, mergeFlat, place } from './geom';
 import { SHARED } from './palette';
@@ -22,7 +22,7 @@ function treeGeo(canopy: string, dark: string): THREE.BufferGeometry {
   return mergeFlat([cbox(0.22, 0.5, 0.22, '#7a5230', 0, 0.25, 0, 0.03), cbox(0.9, 0.78, 0.9, canopy, 0, 0.82, 0, 0.1), cbox(0.62, 0.36, 0.62, dark, 0.05, 1.28, -0.04, 0.08)]);
 }
 
-function kindGeometry(kind: string): THREE.BufferGeometry {
+function kindGeometry(kind: BlockKind): THREE.BufferGeometry {
   switch (kind) {
     case 'tree':
       return treeGeo('#5cbf4a', '#6ccf58');
@@ -32,19 +32,13 @@ function kindGeometry(kind: string): THREE.BufferGeometry {
       return treeGeo('#e0503f', '#f06a55');
     case 'rock':
       return mergeFlat([cbox(0.95, 0.42, 0.95, '#8e96a1', 0, 0.21, 0, 0.1), cbox(0.55, 0.26, 0.5, '#aab1bb', 0.12, 0.52, 0.06, 0.07)]);
-    case 'crystal':
+    default:
       return mergeFlat([
         cbox(0.9, 0.3, 0.9, '#7d8590', 0, 0.15, 0, 0.08),
         place(colored(new THREE.ConeGeometry(0.2, 0.9, 5), '#ff3f5f'), 0, 0.72, 0),
         place(colored(new THREE.ConeGeometry(0.14, 0.62, 5), '#ff7a8f'), 0.24, 0.58, 0.1, 0, 0, -0.35),
         place(colored(new THREE.ConeGeometry(0.13, 0.55, 5), '#e8284c'), -0.22, 0.55, -0.08, 0.3, 0, 0.35),
       ]);
-    default: {
-      const coins: THREE.BufferGeometry[] = [];
-      for (let i = 0; i < 4; i++) coins.push(ccyl(0.3 - i * 0.03, 0.09, i % 2 ? '#ffd24a' : '#f5c020', 14, (i % 2) * 0.05, 0.05 + i * 0.1, 0, 0, 0, 0, '#ffe68a'));
-      coins.push(ccyl(0.22, 0.09, '#ffd24a', 14, 0.32, 0.05, 0.12, 0, 0, 0, '#ffe68a'));
-      return mergeFlat(coins);
-    }
   }
 }
 
@@ -62,7 +56,6 @@ export class ForestView {
   private readonly stumps: THREE.InstancedMesh;
   private readonly stumpSlot: Int32Array;
   private readonly lastHp: Float32Array;
-  private readonly lastGrowth: Float32Array;
   private readonly jitter: Float32Array;
   private readonly anims = new Map<number, CellAnim>();
   private readonly dirty = new Set<number>();
@@ -74,7 +67,6 @@ export class ForestView {
     this.slot = new Int32Array(f.n).fill(-1);
     this.stumpSlot = new Int32Array(f.n).fill(-1);
     this.lastHp = new Float32Array(f.n).fill(NaN);
-    this.lastGrowth = new Float32Array(f.n).fill(NaN);
     this.jitter = new Float32Array(f.n * 3);
 
     // Tanah hutan (cokelat) — terlihat di sela pohon & bekas tebangan.
@@ -100,7 +92,7 @@ export class ForestView {
     KINDS.forEach((k, i) => {
       const mesh = new THREE.InstancedMesh(kindGeometry(k), SHARED.vertexStd, Math.max(1, counts[i]));
       mesh.count = counts[i];
-      mesh.castShadow = k !== 'coins';
+      mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -161,8 +153,6 @@ export class ForestView {
         scale = js * k2;
         tilt = (1 - k2) * 1.1;
         sink = (1 - k2) * 0.3;
-      } else if (state.growth[c] > 0) {
-        scale = js * (0.2 + 0.7 * state.growth[c]); // tunas tumbuh
       }
     }
     _p.set(f.x[c] + jx, -sink, f.z[c] - jx * 0.6);
@@ -173,7 +163,7 @@ export class ForestView {
     this.meshes[k].setMatrixAt(this.slot[c], _m);
     this.meshes[k].instanceMatrix.needsUpdate = true;
     // tunggul terlihat saat blok sudah ditebang (dan tunas masih kecil)
-    const stump = hp === 0 && KINDS[k] !== 'coins' && state.growth[c] < 0.5 && !(anim?.kind === 'fall' && anim.t > 0.2);
+    const stump = hp === 0 && !(anim?.kind === 'fall' && anim.t > 0.2);
     _p.set(f.x[c] + jx, 0, f.z[c] - jx * 0.6);
     _q.setFromAxisAngle(_s.set(0, 1, 0), rot);
     _s.setScalar(stump ? js : 0.0001);
@@ -183,8 +173,8 @@ export class ForestView {
   }
 
   /**
-   * Sinkron dengan state: bandingkan HP/tumbuh tiap sel dengan frame lalu, mulai animasi
-   * kena gergaji / tumbang / muncul lagi, dan tulis ulang hanya sel yang berubah.
+   * Sinkron dengan state: bandingkan HP tiap sel dengan frame lalu, mulai animasi
+   * kena gerinda / tumbang, dan tulis ulang hanya sel yang berubah.
    */
   update(dt: number, state: GameState): number[] {
     const f = this.field;
@@ -192,11 +182,9 @@ export class ForestView {
     for (let c = 0; c < f.n; c++) {
       if (f.kind[c] < 0) continue;
       const hp = state.blocks[c];
-      const g = state.growth[c];
       const prev = this.lastHp[c];
       if (this.first) {
         this.lastHp[c] = hp;
-        this.lastGrowth[c] = g;
         this.dirty.add(c);
         continue;
       }
@@ -207,10 +195,6 @@ export class ForestView {
           felled.push(c);
         } else if (hp > 0 && prev <= 0) this.anims.set(c, { t: 0.35, kind: 'pop' });
         this.lastHp[c] = hp;
-        this.dirty.add(c);
-      }
-      if (Math.abs(g - this.lastGrowth[c]) > 0.03 || (g === 0 && this.lastGrowth[c] !== 0)) {
-        this.lastGrowth[c] = g;
         this.dirty.add(c);
       }
     }

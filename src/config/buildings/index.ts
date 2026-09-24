@@ -4,7 +4,7 @@ import { house } from './house';
 import { clockTower, waterTower } from './special';
 
 /**
- * Katalog tipe bangunan kavling. Tambah tipe baru di sini lalu pakai id-nya di config/cities.ts.
+ * Katalog tipe bangunan kavling. Tambah tipe baru di sini lalu pakai id-nya di config/levels.ts.
  * Setiap tipe punya beberapa varian warna supaya kota tidak monoton.
  */
 export interface BuildingType {

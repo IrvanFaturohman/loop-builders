@@ -79,7 +79,10 @@ export class TrackPath {
       }
       const lenIn = dist(prev, p);
       const lenOut = dist(p, next);
-      const r = Math.min(def.radius, (Math.min(lenIn, lenOut) * 0.5) / Math.tan(theta / 2));
+      // Ruas dibagi dua dengan sudut tetangga, kecuali tetangganya titik awal (tanpa lengkung).
+      const availIn = (i - 1 + n) % n === 0 ? lenIn : lenIn * 0.5;
+      const availOut = (i + 1) % n === 0 ? lenOut : lenOut * 0.5;
+      const r = Math.min(def.radius, Math.min(availIn, availOut) / Math.tan(theta / 2));
       const t = r * Math.tan(theta / 2);
       const t1 = { x: p.x - u.x * t, z: p.z - u.z * t };
       const t2 = { x: p.x + w.x * t, z: p.z + w.z * t };

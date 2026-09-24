@@ -1,19 +1,16 @@
 import { BALANCE } from '../config/balance';
 import { LEVELS } from '../config/levels';
-import { LOT_D, LOT_W, plotsOfLevel, stageCount } from './layout';
-import { trackFor } from './tracks';
+import { bandOf, LOT_D, LOT_W, plotsOfLevel, railStageOf, stageCount } from './layout';
 import type { BlockKind } from './types';
 
 /**
- * Hutan: grid sel 1×1 di sekitar stasiun. Tiap sel berisi satu blok (pohon/batu/kristal/koin)
- * atau kosong. Jenis blok diacak deterministik (seed level) menurut zona jarak dari stasiun.
- * Data ini tidak disimpan — hanya HP sisa tiap sel yang masuk save.
+ * Hutan: grid sel 1×1 menutupi pulau. Tiap sel berisi satu blok (pohon/batu/kristal) atau
+ * kosong. Hutan hanya ada di pita-pita di luar rel pertama; jenis bloknya diacak deterministik
+ * (seed level) menurut bobot pita. Data ini tidak disimpan — hanya HP sisa tiap sel yang masuk save.
  */
 
-export const KINDS: BlockKind[] = ['tree', 'treeGold', 'treeRed', 'rock', 'crystal', 'coins'];
+export const KINDS: BlockKind[] = ['tree', 'treeGold', 'treeRed', 'rock', 'crystal'];
 export const CELL = 1;
-/** Lebar setengah jalur rel yang dibersihkan dari blok. */
-const RAIL_CLEAR = 0.85;
 
 export interface Field {
   half: number;
@@ -23,12 +20,14 @@ export interface Field {
   kind: Int8Array;
   x: Float32Array;
   z: Float32Array;
-  /** Tahap expand yang meletakkan rel di atas sel ini (-1 = tidak pernah). */
+  /** Pita hutan sel (-1 = alun-alun, stageCount = di luar pulau). */
+  band: Int8Array;
+  /** Tahap yang relnya melewati sel ini (-1 = tidak pernah). */
   railStage: Int8Array;
-  /** Kavling yang menempati sel ini (-1 = tidak ada). */
+  /** Kavling yang menempati sel ini (-1 = tidak ada). Hanya untuk tampilan tanah. */
   plotOf: Int16Array;
-  /** Sel-sel yang harus bersih sebelum kavling bisa dibangun. */
-  plotCells: number[][];
+  /** Sel berblok per pita (untuk progres & pemicu rel melebar). */
+  bandCells: number[][];
 }
 
 function rng(seed: number): () => number {
@@ -51,22 +50,25 @@ export function fieldFor(levelIndex: number): Field {
   const kind = new Int8Array(n).fill(-1);
   const x = new Float32Array(n);
   const z = new Float32Array(n);
-  const railStage = new Int8Array(n).fill(-1);
+  const band = new Int8Array(n);
+  const railStage = new Int8Array(n);
   const plotOf = new Int16Array(n).fill(-1);
+  const bands = stageCount(level);
+  const bandCells: number[][] = Array.from({ length: bands }, () => []);
   const r = rng(level.seed);
-  const H = level.hubHalf - 0.35;
   for (let j = 0; j < cols; j++) {
     for (let i = 0; i < cols; i++) {
       const c = j * cols + i;
       x[c] = -half + (i + 0.5) * CELL;
       z[c] = -half + (j + 0.5) * CELL;
+      band[c] = bandOf(level, x[c], z[c]);
+      railStage[c] = railStageOf(level, x[c], z[c]);
       const roll = r();
       const pick = r();
-      if (Math.abs(x[c]) < H && Math.abs(z[c]) < H) continue; // lapangan stasiun
+      const b = band[c];
+      if (b < 0 || b >= bands || railStage[c] === 0) continue;
       if (roll < 0.035) continue; // celah alami
-      const dist = Math.hypot(x[c], z[c]);
-      const zone = level.zones.find((zn) => dist < zn.maxR) ?? level.zones[level.zones.length - 1];
-      const entries = KINDS.map((k) => [k, zone.weights[k] ?? 0] as const).filter(([, w]) => w > 0);
+      const entries = KINDS.map((k) => [k, level.bands[b][k] ?? 0] as const).filter(([, w]) => w > 0);
       const total = entries.reduce((s, [, w]) => s + w, 0);
       let acc = 0;
       for (const [k, w] of entries) {
@@ -77,52 +79,37 @@ export function fieldFor(levelIndex: number): Field {
         }
       }
       if (kind[c] < 0) kind[c] = KINDS.indexOf(entries[entries.length - 1][0]);
+      bandCells[b].push(c);
     }
   }
-  // Jalur rel tiap tahap: sel di bawah rel dibersihkan saat rel diletakkan.
-  for (let s = stageCount(level) - 1; s >= 0; s--) {
-    const t = trackFor(levelIndex, s);
-    const p = { x: 0, z: 0 };
-    for (let d = 0; d < t.length; d += 0.2) {
-      t.pointAt(d, p);
-      forCellsInRadius(half, cols, p.x, p.z, RAIL_CLEAR + 0.5, (c) => {
-        if (Math.hypot(x[c] - p.x, z[c] - p.z) < RAIL_CLEAR) railStage[c] = s;
-      });
-    }
-  }
-  // Sel kavling
-  const plots = plotsOfLevel(levelIndex);
-  const plotCells: number[][] = plots.map(() => []);
-  for (const p of plots) {
-    const alongX = Math.abs(p.facing.z) > 0.5;
+  for (const p of plotsOfLevel(levelIndex)) {
+    const alongX = Math.abs(p.facing.z) > Math.abs(p.facing.x);
     const hx = (alongX ? LOT_W : LOT_D) / 2;
     const hz = (alongX ? LOT_D : LOT_W) / 2;
-    for (let c = 0; c < n; c++) {
-      if (Math.abs(x[c] - p.pos.x) < hx && Math.abs(z[c] - p.pos.z) < hz) {
-        plotOf[c] = p.index;
-        plotCells[p.index].push(c);
-        // Kavling selalu tertutup hutan (supaya ada yang ditebang dulu).
-        if (kind[c] < 0 || KINDS[kind[c]] === 'coins') kind[c] = KINDS.indexOf(level.buildResource === 'stone' ? 'rock' : 'tree');
-      }
-    }
+    for (let c = 0; c < n; c++) if (Math.abs(x[c] - p.pos.x) < hx && Math.abs(z[c] - p.pos.z) < hz) plotOf[c] = p.index;
   }
-  f = { half, cols, n, kind, x, z, railStage, plotOf, plotCells };
+  f = { half, cols, n, kind, x, z, band, railStage, plotOf, bandCells };
   cache.set(levelIndex, f);
   return f;
 }
 
-/** HP awal semua sel untuk permainan baru (rel tahap 0 sudah bersih). */
+/** HP awal semua sel untuk permainan baru. */
 export function initialBlocks(levelIndex: number): number[] {
   const f = fieldFor(levelIndex);
   const out: number[] = new Array(f.n);
-  for (let c = 0; c < f.n; c++) {
-    out[c] = f.kind[c] < 0 || f.railStage[c] === 0 ? -1 : BALANCE.blocks[KINDS[f.kind[c]]].hp;
-  }
+  for (let c = 0; c < f.n; c++) out[c] = f.kind[c] < 0 ? -1 : BALANCE.blocks[KINDS[f.kind[c]]].hp;
   return out;
 }
 
 export function maxHp(f: Field, c: number): number {
   return f.kind[c] < 0 ? -1 : BALANCE.blocks[KINDS[f.kind[c]]].hp;
+}
+
+/** Poin bahan yang dihasilkan sel bila ditebang (0 untuk sel kosong). */
+export function cellPoints(f: Field, c: number): number {
+  if (f.kind[c] < 0) return 0;
+  const def = BALANCE.blocks[KINDS[f.kind[c]]];
+  return def.amount * BALANCE.points[def.res];
 }
 
 /** Panggil cb untuk setiap sel yang pusatnya mungkin berada dalam radius r dari (px, pz). */

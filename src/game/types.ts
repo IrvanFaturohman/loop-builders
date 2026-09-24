@@ -2,17 +2,17 @@
  * Struktur data inti permainan. Semua yang ada di sini murni data (tanpa Three.js / DOM),
  * sehingga logika simulasi bisa diuji di Node dan disimpan ke localStorage.
  *
- * Konsep "Tebang & Bangun": satu kereta dengan gerbong gergaji berkeliling rel yang
- * bercabang ke hutan. Gergaji menebang blok (pohon, batu, kristal) di sekitar rel; lahan
- * kavling yang sudah bersih menjadi tempat membangun rumah dari kayu/batu hasil tebangan.
- * Rumah yang jadi membayar sewa tiap kereta lewat, sisa muatan dijual di stasiun.
- * Seluruh jaringan rel secara teknis tetap SATU loop tertutup (keliling stasiun + setiap
- * cabang keluar-masuk), jadi aturan crossing tetap sederhana dan teruji.
+ * Konsep (mengikuti Train Miner): kereta berjalan searah jarum jam di rel cincin yang
+ * mengelilingi kota. Susunannya lokomotif → satu gerbong muatan → gerbong pemotong.
+ * Pemotong menjulurkan lengan ke kiri (sisi luar loop, arah hutan) dan menebang satu blok
+ * sekaligus. Muatan dibongkar di stasiun dan langsung dipasang ke bangunan kota; setiap poin
+ * bahan yang terpasang menjadi koin. Saat pita hutan di luar rel bersih, rel melebar keluar
+ * sendiri dan lahan bekasnya menjadi distrik kota berikutnya. Hutan tidak tumbuh kembali:
+ * total bahan di hutan sama persis dengan total kebutuhan kota.
  */
 
 export type MaterialKind = 'wood' | 'brick';
 export type ThemeKind = 'forest' | 'meadow' | 'city';
-export type HubSide = 'N' | 'E' | 'S' | 'W';
 /** Jenis muatan kereta. */
 export type Resource = 'wood' | 'stone' | 'gem';
 
@@ -25,37 +25,22 @@ export interface Vec2 {
 // Definisi konten (config, tidak disimpan)
 // ---------------------------------------------------------------------------
 
-/** Satu kavling bangunan di sisi luar rel. */
-export interface PlotDef {
-  /** 'out' = lajur berangkat, 'ret' = lajur pulang, 'end' = ujung cabang (di balik putaran U). */
-  lane: 'out' | 'ret' | 'end';
-  /** Jarak dari pangkal cabang (sisi stasiun) untuk lajur out/ret. Diabaikan untuk 'end'. */
-  at: number;
+/** Satu bangunan kota. Biaya sebenarnya dihitung dari hasil pita hutan (lihat economy.ts). */
+export interface LotDef {
   /** Id tipe bangunan (lihat config/buildings). */
   building: string;
   variant: number;
-  /** Material yang dibutuhkan. */
-  target: number;
-  /** Uang sewa setiap kali kereta melewati bangunan yang sudah jadi. */
-  rent: number;
+  /** Bobot porsi bahan pita hutan yang dipakai bangunan ini. */
+  weight: number;
 }
 
-export interface StreetDef {
+/** Distrik k terbuka di tahap k: distrik 0 = lapangan tengah, distrik k = lahan bekas pita k-1. */
+export interface DistrictDef {
   name: string;
-  side: HubSide;
-  length: number;
-  unlockStage: number;
-  plots: PlotDef[];
+  lots: LotDef[];
 }
 
-/** Zona hutan berdasar jarak dari stasiun: bobot tiap jenis blok. */
-export interface ZoneDef {
-  /** Berlaku untuk jarak < maxR (zona pertama yang cocok dipakai). */
-  maxR: number;
-  weights: Partial<Record<BlockKind, number>>;
-}
-
-export type BlockKind = 'tree' | 'treeGold' | 'treeRed' | 'rock' | 'crystal' | 'coins';
+export type BlockKind = 'tree' | 'treeGold' | 'treeRed' | 'rock' | 'crystal';
 
 export interface LevelDefinition {
   id: string;
@@ -63,19 +48,20 @@ export interface LevelDefinition {
   theme: ThemeKind;
   /** Tampilan bangunan: kayu atau bata. */
   material: MaterialKind;
-  /** Muatan yang dipakai membangun (kayu → rumah kayu, batu → rumah bata). */
-  buildResource: Resource;
-  hubHalf: number;
-  laneHalf: number;
-  radius: number;
-  streets: StreetDef[];
-  expandCosts: number[];
-  /** Setengah lebar peta hutan (blok ada di [-mapHalf, mapHalf]). */
+  /** Setengah lebar rel cincin pertama (pusat → garis tengah rel di sisi lurus). */
+  ringStart: number;
+  /** Jarak antar cincin rel = lebar pita hutan yang dibersihkan per tahap. */
+  ringStep: number;
+  /** Radius lengkung sudut rel cincin pertama (cincin berikutnya = offset, radius ikut membesar). */
+  cornerRadius: number;
+  /** Satu distrik per tahap; jumlahnya menentukan jumlah tahap rel. */
+  districts: DistrictDef[];
+  /** Bobot jenis blok per pita hutan (indeks = tahap). */
+  bands: Partial<Record<BlockKind, number>>[];
+  /** Setengah lebar peta (grid sel dibuat di [-mapHalf, mapHalf]). */
   mapHalf: number;
-  zones: ZoneDef[];
   seed: number;
   costScale: number;
-  streetBonus: number[];
   completionBonus: number;
 }
 
@@ -126,8 +112,9 @@ export interface Cargo {
 export interface Train {
   /** Jarak tempuh lokomotif di lintasan, 0 <= distance < panjang lintasan. */
   distance: number;
-  /** Tingkat tiap gerbong gergaji, urut dari belakang lokomotif (tertinggi di depan). */
-  wagons: number[];
+  /** Tingkat tiap gerbong pemotong, urut dari depan (tepat di belakang gerbong muatan). */
+  cutters: number[];
+  /** Isi satu-satunya gerbong muatan (tepat di belakang lokomotif). */
   cargo: Cargo;
 }
 
@@ -135,7 +122,6 @@ export interface TutorialFlags {
   boost: boolean;
   add: boolean;
   merge: boolean;
-  expand: boolean;
   capacity: boolean;
   speed: boolean;
 }
@@ -144,26 +130,21 @@ export interface GameStats {
   levelTime: number;
   totalTime: number;
   totalCut: number;
-  totalRent: number;
-  totalSold: number;
+  /** Poin bahan yang sudah terpasang ke bangunan (semua level). */
+  totalBuilt: number;
   lastCompletionBonus: number;
-  lastLeftoverMoney: number;
 }
 
 export interface GameState {
   levelIndex: number;
   cycle: number;
   money: number;
-  /**
-   * HP sisa tiap sel hutan: >0 blok hidup, 0 = sudah ditebang (tunggul), -1 = kosong
-   * (tidak pernah ada blok / jalur rel).
-   */
+  /** HP sisa tiap sel hutan: >0 blok hidup, 0 = sudah ditebang, -1 = kosong / jalur rel. */
   blocks: number[];
-  /** Progres tumbuh kembali (0..1) tunggul; saat mencapai 1 blok hidup lagi dengan HP penuh. */
-  growth: number[];
-  /** Material terpasang per kavling. */
+  /** Poin bahan terpasang per kavling (urut distrik, lalu urutan di distrik). */
   plots: number[];
-  streetsPaid: boolean[];
+  /** Poin bahan di gudang stasiun yang belum punya bangunan terbuka. */
+  stock: number;
   completed: boolean;
   expandStage: number;
   train: Train;
@@ -191,10 +172,12 @@ export interface BoostState {
 
 export interface Runtime {
   boost: BoostState;
-  /** Detik kereta dibekukan (animasi rel baru). */
+  /** Detik kereta dibekukan (animasi rel melebar). */
   freeze: number;
-  /** Detik terakhir gergaji menebang (untuk audio/visual). */
+  /** Detik terakhir pemotong menebang (untuk audio/visual). */
   cutHeat: number;
   /** Detik muatan penuh berturut-turut (untuk hint kapasitas). */
   fullTime: number;
+  /** Sel yang sedang dipotong tiap pemotong (-1 = lengan ditarik). Render membacanya untuk posisi lengan. */
+  targets: number[];
 }

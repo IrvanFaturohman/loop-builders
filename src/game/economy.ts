@@ -1,11 +1,11 @@
 import { BALANCE } from '../config/balance';
 import { getBuilding } from '../config/buildings';
 import { LEVELS } from '../config/levels';
-import { plotsOfLevel, type ResolvedPlot } from './layout';
+import { plotsOfLevel, stageCount, type ResolvedPlot } from './layout';
 import { trackFor } from './tracks';
 import type { TrackPath } from './track';
-import type { Cargo, FinalProject, GameState, LevelDefinition, Resource } from './types';
-import { fieldFor } from './worldgen';
+import type { Cargo, FinalProject, GameState, LevelDefinition } from './types';
+import { cellPoints, fieldFor } from './worldgen';
 
 export { trackFor };
 
@@ -29,56 +29,76 @@ export function plotsOf(levelIndex: number): ResolvedPlot[] {
   return plotsOfLevel(levelIndex);
 }
 
-export function isPlotUnlocked(state: GameState, plot: number): boolean {
-  const p = plotsOf(state.levelIndex)[plot];
-  return levelDef(state).streets[p.street].unlockStage <= state.expandStage;
+/** Stasiun berada di titik awal loop (jarak 0), di tengah sisi bawah setiap cincin. */
+export const STATION_D = 0;
+
+// ---------------------------------------------------------------------------
+// Kalibrasi kota: biaya bangunan = hasil hutan
+// ---------------------------------------------------------------------------
+
+const bandPointCache = new Map<number, number[]>();
+
+/** Total poin bahan tiap pita hutan sebuah level. */
+export function bandPoints(levelIndex: number): number[] {
+  let out = bandPointCache.get(levelIndex);
+  if (!out) {
+    const f = fieldFor(levelIndex);
+    out = new Array<number>(stageCount(LEVELS[levelIndex])).fill(0);
+    for (let c = 0; c < f.n; c++) if (f.kind[c] >= 0) out[f.band[c]] += cellPoints(f, c);
+    bandPointCache.set(levelIndex, out);
+  }
+  return out;
 }
 
-/** Lahan kavling sudah bersih (semua blok di atasnya ditebang) dan cabangnya terbuka. */
-export function isPlotReady(state: GameState, plot: number): boolean {
-  if (!isPlotUnlocked(state, plot)) return false;
-  for (const c of fieldFor(state.levelIndex).plotCells[plot]) if (state.blocks[c] > 0) return false;
-  return true;
+const targetCache = new Map<number, number[]>();
+
+/**
+ * Biaya tiap kavling: poin pita hutan k dibagi ke bangunan distrik k menurut bobotnya
+ * (sisa pembulatan terbesar dulu), jadi jumlah biaya distrik = hasil pitanya persis.
+ * Hutan habis ⇔ kota selesai, tanpa angka yang perlu disetel tangan.
+ */
+export function plotTargets(levelIndex: number): number[] {
+  let out = targetCache.get(levelIndex);
+  if (out) return out;
+  const plots = plotsOfLevel(levelIndex);
+  const points = bandPoints(levelIndex);
+  out = new Array<number>(plots.length).fill(0);
+  LEVELS[levelIndex].districts.forEach((_, di) => {
+    const members = plots.filter((p) => p.district === di);
+    const total = points[di];
+    const wsum = members.reduce((s, p) => s + p.def.weight, 0);
+    const raw = members.map((p) => (total * p.def.weight) / wsum);
+    const base = raw.map(Math.floor);
+    let rest = total - base.reduce((s, v) => s + v, 0);
+    const order = raw.map((r, i) => ({ i, frac: r - Math.floor(r) })).sort((a, b) => b.frac - a.frac || a.i - b.i);
+    for (let k = 0; rest > 0; k = (k + 1) % order.length, rest--) base[order[k].i]++;
+    members.forEach((p, i) => (out![p.index] = base[i]));
+  });
+  targetCache.set(levelIndex, out);
+  return out;
 }
 
-/** Persentase lahan kavling yang sudah bersih (0..1). */
-export function plotClearedRatio(state: GameState, plot: number): number {
-  const cells = fieldFor(state.levelIndex).plotCells[plot];
-  if (!cells.length) return 1;
-  return cells.filter((c) => state.blocks[c] <= 0).length / cells.length;
+export function plotTarget(state: GameState, plot: number): number {
+  return plotTargets(state.levelIndex)[plot];
 }
 
 export function plotProject(state: GameState, plot: number): FinalProject {
   const p = plotsOf(state.levelIndex)[plot];
-  return getBuilding(p.def.building, p.def.variant, Math.round(p.def.target * cycleScale(state)));
+  return getBuilding(p.def.building, p.def.variant, plotTarget(state, plot));
 }
 
-export function plotTarget(state: GameState, plot: number): number {
-  return plotProject(state, plot).target;
+export function isPlotUnlocked(state: GameState, plot: number): boolean {
+  return plotsOf(state.levelIndex)[plot].district <= state.expandStage;
 }
 
 export function isPlotComplete(state: GameState, plot: number): boolean {
   return state.plots[plot] >= plotTarget(state, plot);
 }
 
-export function plotRent(state: GameState, plot: number): number {
-  return Math.round(plotsOf(state.levelIndex)[plot].def.rent * cycleScale(state));
+/** Bonus koin saat bangunan selesai. */
+export function plotBonus(state: GameState, plot: number): number {
+  return Math.round(plotTarget(state, plot) * BALANCE.buildBonus * cycleScale(state));
 }
-
-const keyCache = new Map<string, number>();
-
-export function plotDistance(levelIndex: number, stage: number, plot: number): number {
-  const key = `p${levelIndex}:${stage}:${plot}`;
-  let d = keyCache.get(key);
-  if (d === undefined) {
-    d = trackFor(levelIndex, stage).closestDistance(plotsOf(levelIndex)[plot].anchor).d;
-    keyCache.set(key, d);
-  }
-  return d;
-}
-
-/** Stasiun berada di titik awal loop (jarak 0), di sisi barat lapangan stasiun. */
-export const STATION_D = 0;
 
 // ---------------------------------------------------------------------------
 // Rumus angka
@@ -92,25 +112,26 @@ export function capacity(state: GameState): number {
   return Math.round(BALANCE.capacity.base * Math.pow(BALANCE.capacity.growth, state.capacityLevel - 1));
 }
 
-export function sawDps(level: number): number {
-  return BALANCE.saw.dps * Math.pow(BALANCE.saw.growth, level - 1);
+export function cutterDps(level: number): number {
+  return BALANCE.cutter.dps * Math.pow(BALANCE.cutter.growth, level - 1);
 }
 
-/** Jangkauan gergaji gerbong (melebar tiap tingkat merge). */
-export function sawReach(level: number): number {
-  return BALANCE.saw.reach + BALANCE.saw.reachPerLevel * (level - 1);
+/** Panjang lengan pemotong (bertambah tiap tingkat merge). */
+export function cutterReach(level: number): number {
+  return BALANCE.cutter.reach + BALANCE.cutter.reachPerLevel * (level - 1);
 }
 
 export function cargoTotal(c: Cargo): number {
   return c.wood + c.stone + c.gem;
 }
 
-export function price(state: GameState, r: Resource): number {
-  return BALANCE.price[r] * cycleScale(state);
+export function cargoPoints(c: Cargo): number {
+  return c.wood * BALANCE.points.wood + c.stone * BALANCE.points.stone + c.gem * BALANCE.points.gem;
 }
 
-export function cargoValue(state: GameState, c: Cargo): number {
-  return Math.round(c.wood * price(state, 'wood') + c.stone * price(state, 'stone') + c.gem * price(state, 'gem'));
+/** Koin untuk sejumlah poin bahan yang terpasang. */
+export function buildCoins(state: GameState, points: number): number {
+  return Math.round(points * BALANCE.coinPerPoint * cycleScale(state));
 }
 
 function niceRound(v: number): number {
@@ -146,26 +167,40 @@ export function capacityCost(state: GameState): number | null {
   return niceRound(c.base * costMult(state) * Math.pow(c.growth, state.capacityLevel - 1));
 }
 
-export function expandCost(state: GameState): number | null {
-  const costs = levelDef(state).expandCosts;
-  if (state.expandStage >= costs.length) return null;
-  return niceRound(costs[state.expandStage] * cycleScale(state));
-}
-
-/** Pasangan gerbong setingkat terendah (indeks di array wagons), atau null. */
+/** Pasangan pemotong setingkat terendah (indeks di array cutters), atau null. */
 export function findMergePair(state: GameState): [number, number] | null {
-  const w = state.train.wagons;
-  for (let lv = 1; lv < BALANCE.maxWagonLevel; lv++) {
+  const w = state.train.cutters;
+  for (let lv = 1; lv < BALANCE.maxCutterLevel; lv++) {
     const idx = w.map((l, i) => (l === lv ? i : -1)).filter((i) => i >= 0);
     if (idx.length >= 2) return [idx[idx.length - 2], idx[idx.length - 1]];
   }
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Progres
+// ---------------------------------------------------------------------------
+
 export function buildingsDone(state: GameState): { done: number; total: number } {
   let done = 0;
   for (let i = 0; i < state.plots.length; i++) if (isPlotComplete(state, i)) done++;
   return { done, total: state.plots.length };
+}
+
+/** Porsi poin bahan kota yang sudah terpasang (0..1). */
+export function cityProgress(state: GameState): number {
+  const targets = plotTargets(state.levelIndex);
+  const total = targets.reduce((s, v) => s + v, 0);
+  const built = state.plots.reduce((s, v, i) => s + Math.min(v, targets[i]), 0);
+  return total ? built / total : 1;
+}
+
+/** Blok hidup yang tersisa di sebuah pita. */
+export function bandRemaining(state: GameState, band: number): number {
+  const cells = fieldFor(state.levelIndex).bandCells[band] ?? [];
+  let n = 0;
+  for (const c of cells) if (state.blocks[c] > 0) n++;
+  return n;
 }
 
 /** Porsi blok hutan yang sudah ditebang (0..1). */
@@ -176,7 +211,7 @@ export function forestCleared(state: GameState): number {
   for (let c = 0; c < f.n; c++) {
     if (f.kind[c] < 0) continue;
     total++;
-    if (state.blocks[c] === 0) cut++;
+    if (state.blocks[c] <= 0) cut++;
   }
-  return total ? cut / total : 0;
+  return total ? cut / total : 1;
 }

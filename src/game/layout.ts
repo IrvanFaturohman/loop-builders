@@ -1,84 +1,106 @@
 import { LEVELS } from '../config/levels';
-import type { TrackShape } from './track';
-import type { LevelDefinition, HubSide, PlotDef, Vec2 } from './types';
+import { TrackPath, type TrackShape } from './track';
+import type { LevelDefinition, LotDef, Vec2 } from './types';
 
 /**
- * Tata letak kota: menghasilkan titik sudut loop tertutup untuk sebuah tahap expand,
- * posisi kavling, dan titik pickup di sisi depot.
+ * Tata letak pulau: rel cincin per tahap, pita hutan, dan kavling kota.
  *
- * Loop berjalan searah jarum jam (di layar: x ke kanan, z ke bawah) mengelilingi depot.
- * Setiap jalan yang terbuka menjadi "ekskursi" dari tengah sisi depot:
- *   pangkal lajur berangkat → keluar sejauh `length` → putaran U → lajur pulang → kembali ke sisi.
- * Hasilnya satu kurva tertutup tanpa persimpangan, tetapi terlihat seperti jaringan jalan
- * dua lajur yang bercabang dari pusat.
+ * Semua cincin adalah offset dari rel pertama (persegi membulat setengah-lebar `ringStart`,
+ * radius sudut `cornerRadius`): rel tahap k berada tepat di jarak bertanda k·ringStep dari rel
+ * pertama. Karena itu satu fungsi jarak bertanda (`ringDistance`) cukup untuk menentukan pita
+ * hutan, jalur rel, dan posisi kavling.
+ *
+ * Loop berjalan searah jarum jam (di layar: x ke kanan, z ke bawah) mulai dari tengah sisi
+ * bawah, tempat stasiun berada. Sisi kiri kereta = sisi luar loop = arah hutan.
  */
 
-export const LOT_W = 2.0; // lebar kavling sepanjang jalan
+export const LOT_W = 2.0; // lebar kavling sepanjang jalur
 export const LOT_D = 1.8; // kedalaman kavling
-/** Jarak pusat kavling dari garis tengah lajur (setengah jalan + kerb + trotoar + setengah kavling). */
-export const LOT_OFFSET = 1.95;
+/** Setengah lebar jalur rel yang bebas blok/kavling. */
+export const RAIL_CLEAR = 0.85;
+/** Panjang jalur kavling di depan stasiun yang dikosongkan (jalan masuk ke alun-alun). */
+export const STATION_GAP = 3.2;
+/** Setengah lebar jalur kavling distrik 0 (alun-alun di dalam rel pertama). */
+const CENTER_HALF = 2;
+/** Jarak jalur kavling distrik k≥1 di luar rel lama (hampir di atas bekas relnya). */
+const LOT_SHIFT = 0.45;
 
-interface SideGeo {
-  start: Vec2;
-  dir: Vec2;
-  out: Vec2;
+export function stageCount(level: LevelDefinition): number {
+  return level.districts.length;
 }
 
-export const SIDE_ORDER: HubSide[] = ['N', 'E', 'S', 'W'];
-
-const SIDES: Record<HubSide, SideGeo> = {
-  N: { start: { x: -1, z: -1 }, dir: { x: 1, z: 0 }, out: { x: 0, z: -1 } },
-  E: { start: { x: 1, z: -1 }, dir: { x: 0, z: 1 }, out: { x: 1, z: 0 } },
-  S: { start: { x: 1, z: 1 }, dir: { x: -1, z: 0 }, out: { x: 0, z: 1 } },
-  W: { start: { x: -1, z: 1 }, dir: { x: 0, z: -1 }, out: { x: -1, z: 0 } },
-};
-
-/** Normal kiri (di layar) dari arah v — untuk loop searah jarum jam ini = sisi luar. */
-function left(v: Vec2): Vec2 {
-  return { x: v.z, z: -v.x };
+/** Jarak bertanda rel tahap `stage` dari rel pertama. */
+export function railOffset(level: LevelDefinition, stage: number): number {
+  return stage * level.ringStep;
 }
 
-function add(a: Vec2, b: Vec2, s = 1): Vec2 {
-  return { x: a.x + b.x * s, z: a.z + b.z * s };
+/** Jarak bertanda titik (x, z) ke rel pertama: negatif di dalam, positif di luar. */
+export function ringDistance(level: LevelDefinition, x: number, z: number): number {
+  const inner = level.ringStart - level.cornerRadius;
+  const qx = Math.abs(x) - inner;
+  const qz = Math.abs(z) - inner;
+  const outside = Math.hypot(Math.max(qx, 0), Math.max(qz, 0));
+  return outside + Math.min(Math.max(qx, qz), 0) - level.cornerRadius;
+}
+
+/**
+ * Pita hutan tempat titik berada: -1 = alun-alun/rel pertama, k = pita di luar rel tahap k
+ * (dibersihkan selama tahap k), stageCount = di luar pulau.
+ * Batas pita digeser RAIL_CLEAR keluar supaya jalur rel berikutnya seluruhnya ada di pita
+ * sebelumnya — rel selalu melebar ke lahan yang sudah bersih.
+ */
+export function bandOf(level: LevelDefinition, x: number, z: number): number {
+  const sd = ringDistance(level, x, z) - RAIL_CLEAR;
+  if (sd <= 0) return -1;
+  return Math.min(stageCount(level), Math.ceil(sd / level.ringStep) - 1);
+}
+
+/** Tahap yang relnya melewati titik (x, z), atau -1. */
+export function railStageOf(level: LevelDefinition, x: number, z: number): number {
+  const sd = ringDistance(level, x, z);
+  for (let s = 0; s < stageCount(level); s++) if (Math.abs(sd - railOffset(level, s)) < RAIL_CLEAR) return s;
+  return -1;
+}
+
+/** Persegi membulat searah jarum jam, titik awal di tengah sisi bawah. */
+function ringShape(half: number, radius: number): TrackShape {
+  const h = round(half);
+  return { corners: [[0, h], [-h, h], [-h, -h], [h, -h], [h, h]], radius: round(radius) };
+}
+
+export function stageDef(level: LevelDefinition, stage: number): TrackShape {
+  const o = railOffset(level, stage);
+  return ringShape(level.ringStart + o, level.cornerRadius + o);
+}
+
+/** Posisi stasiun pada rel tahap `stage` (jarak 0 lintasan). */
+export function stationPoint(level: LevelDefinition, stage: number): Vec2 {
+  return { x: 0, z: level.ringStart + railOffset(level, stage) };
+}
+
+/** Setengah lebar pulau (tepi luar pita terakhir di sisi lurus). */
+export function islandHalf(level: LevelDefinition): number {
+  return level.ringStart + railOffset(level, stageCount(level)) + RAIL_CLEAR;
 }
 
 export interface ResolvedPlot {
-  /** Indeks global kavling (urutan jalan lalu kavling). */
+  /** Indeks global kavling (urutan distrik lalu urutan di distrik). */
   index: number;
-  street: number;
-  def: PlotDef;
+  district: number;
+  def: LotDef;
   /** Pusat kavling. */
   pos: Vec2;
-  /** Arah hadap bangunan (lokal +z menghadap jalan). */
+  /** Arah hadap bangunan (lokal +z menghadap rel). */
   rotY: number;
-  /** Titik di garis tengah lajur tempat truk "melintasi" kavling. */
-  anchor: Vec2;
-  /** Arah hadap (unit) dari kavling ke jalan. */
+  /** Arah hadap (unit) dari kavling ke rel = keluar. */
   facing: Vec2;
 }
 
-export interface StreetGeo {
-  street: number;
-  side: HubSide;
-  /** Empat sudut ekskursi: pangkal berangkat, ujung berangkat, ujung pulang, pangkal pulang. */
-  a: Vec2;
-  b: Vec2;
-  c: Vec2;
-  d: Vec2;
-  out: Vec2;
-}
-
-function streetGeo(city: LevelDefinition, si: number): StreetGeo {
-  const st = city.streets[si];
-  const H = city.hubHalf;
-  const L = city.laneHalf;
-  const g = SIDES[st.side];
-  const start = { x: g.start.x * H, z: g.start.z * H };
-  const a = add(start, g.dir, H - L);
-  const d = add(start, g.dir, H + L);
-  const b = add(a, g.out, st.length);
-  const c = add(d, g.out, st.length);
-  return { street: si, side: st.side, a, b, c, d, out: g.out };
+/** Jalur tempat kavling distrik diletakkan (searah jarum jam dari tengah sisi bawah). */
+export function districtPath(level: LevelDefinition, district: number): TrackPath {
+  if (district === 0) return new TrackPath(ringShape(CENTER_HALF, 0.3));
+  const o = railOffset(level, district - 1) + LOT_SHIFT;
+  return new TrackPath(ringShape(level.ringStart + o, level.cornerRadius + o));
 }
 
 const plotCache = new Map<number, ResolvedPlot[]>();
@@ -93,113 +115,30 @@ export function plotsOfLevel(levelIndex: number): ResolvedPlot[] {
   return p;
 }
 
-/** Semua kavling (posisi tidak bergantung tahap). */
-export function resolvePlots(city: LevelDefinition): ResolvedPlot[] {
+/**
+ * Kavling tiap distrik tersebar rata di jalurnya, menghadap rel, simetris kiri-kanan dengan
+ * celah di depan stasiun (jalan masuk dari stasiun ke alun-alun).
+ */
+export function resolvePlots(level: LevelDefinition): ResolvedPlot[] {
   const out: ResolvedPlot[] = [];
-  city.streets.forEach((st, si) => {
-    const g = streetGeo(city, si);
-    for (const def of st.plots) {
-      let anchor: Vec2;
-      let facing: Vec2;
-      let pos: Vec2;
-      if (def.lane === 'out') {
-        anchor = add(g.a, g.out, def.at);
-        const n = left(g.out);
-        pos = add(anchor, n, LOT_OFFSET);
-        facing = { x: -n.x, z: -n.z };
-      } else if (def.lane === 'ret') {
-        anchor = add(g.d, g.out, def.at);
-        const n = left({ x: -g.out.x, z: -g.out.z });
-        pos = add(anchor, n, LOT_OFFSET);
-        facing = { x: -n.x, z: -n.z };
-      } else {
-        anchor = { x: (g.b.x + g.c.x) / 2, z: (g.b.z + g.c.z) / 2 };
-        pos = add(anchor, g.out, LOT_OFFSET);
-        facing = { x: -g.out.x, z: -g.out.z };
-      }
-      out.push({ index: out.length, street: si, def, pos, anchor, facing, rotY: Math.atan2(facing.x, facing.z) });
-    }
+  level.districts.forEach((dist, di) => {
+    const path = districtPath(level, di);
+    const n = dist.lots.length;
+    const span = (path.length - STATION_GAP) / n;
+    dist.lots.forEach((def, i) => {
+      const d = STATION_GAP / 2 + (i + 0.5) * span;
+      const pos = path.pointAt(d);
+      const facing = path.outwardAt(d);
+      out.push({ index: out.length, district: di, def, pos, facing, rotY: Math.atan2(facing.x, facing.z) });
+    });
   });
   return out;
 }
 
-/** Titik sudut loop untuk tahap `stage` (titik pertama = titik awal di sisi barat, di ruas lurus). */
-export function stageCorners(city: LevelDefinition, stage: number): [number, number][] {
-  const H = city.hubHalf;
-  const L = city.laneHalf;
-  const r = city.radius;
-  const pts: Vec2[] = [];
-  const W = SIDES.W;
-  // Titik awal: sisi barat, antara lajur pulang jalan barat dan sudut barat laut (selalu lurus).
-  const ts = (H + L + 2 * H - r) / 2;
-  pts.push(add({ x: W.start.x * H, z: W.start.z * H }, W.dir, ts));
-  for (const side of SIDE_ORDER) {
-    const g = SIDES[side];
-    pts.push({ x: g.start.x * H, z: g.start.z * H });
-    const si = city.streets.findIndex((s) => s.side === side && s.unlockStage <= stage);
-    if (si >= 0) {
-      const sg = streetGeo(city, si);
-      pts.push(sg.a, sg.b, sg.c, sg.d);
-    }
-  }
-  return pts.map((p) => [round(p.x), round(p.z)]);
-}
-
-/** Titik pickup di keempat sisi depot, tepat sebelum pangkal jalan di sisi tersebut. */
-export function pickupPoints(city: LevelDefinition): Vec2[] {
-  const H = city.hubHalf;
-  const L = city.laneHalf;
-  return SIDE_ORDER.map((side) => {
-    const g = SIDES[side];
-    return add({ x: g.start.x * H, z: g.start.z * H }, g.dir, (H - L) / 2);
-  });
-}
-
-export function stageDef(city: LevelDefinition, stage: number): TrackShape {
-  return { corners: stageCorners(city, stage), radius: city.radius };
-}
-
-export function stageCount(city: LevelDefinition): number {
-  return city.expandCosts.length + 1;
-}
-
-export function streetsUnlocked(city: LevelDefinition, stage: number): number[] {
-  return city.streets.map((s, i) => (s.unlockStage <= stage ? i : -1)).filter((i) => i >= 0);
-}
-
-export function streetGeometry(city: LevelDefinition, si: number): StreetGeo {
-  return streetGeo(city, si);
-}
-
-/** Kotak batas (x/z) area yang terpakai pada tahap tertentu (jalan + kavling terbuka). */
-export function stageBounds(city: LevelDefinition, stage: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
-  const H = city.hubHalf + 0.9;
-  let b = { minX: -H, maxX: H, minZ: -H, maxZ: H };
-  const plots = resolvePlots(city);
-  for (const p of plots) {
-    if (city.streets[p.street].unlockStage > stage) continue;
-    const ext = Math.max(LOT_W, LOT_D) / 2 + 0.2;
-    b = { minX: Math.min(b.minX, p.pos.x - ext), maxX: Math.max(b.maxX, p.pos.x + ext), minZ: Math.min(b.minZ, p.pos.z - ext), maxZ: Math.max(b.maxZ, p.pos.z + ext) };
-  }
-  for (const si of streetsUnlocked(city, stage)) {
-    const g = streetGeo(city, si);
-    for (const q of [g.b, g.c]) {
-      b = { minX: Math.min(b.minX, q.x - 0.9), maxX: Math.max(b.maxX, q.x + 0.9), minZ: Math.min(b.minZ, q.z - 0.9), maxZ: Math.max(b.maxZ, q.z + 0.9) };
-    }
-  }
-  return b;
-}
-
-/** Kotak batas satu jalan beserta kavlingnya. */
-export function streetBounds(city: LevelDefinition, si: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
-  const g = streetGeo(city, si);
-  let b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
-  const grow = (x: number, z: number, e: number) => {
-    b = { minX: Math.min(b.minX, x - e), maxX: Math.max(b.maxX, x + e), minZ: Math.min(b.minZ, z - e), maxZ: Math.max(b.maxZ, z + e) };
-  };
-  for (const q of [g.a, g.b, g.c, g.d]) grow(q.x, q.z, 0.9);
-  for (const p of resolvePlots(city)) if (p.street === si) grow(p.pos.x, p.pos.z, Math.max(LOT_W, LOT_D) / 2 + 0.2);
-  return b;
+/** Kotak batas pulau yang sudah terlihat pada tahap tertentu (rel + pita yang sedang ditebang). */
+export function stageBounds(level: LevelDefinition, stage: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
+  const h = level.ringStart + railOffset(level, stage + 1) + RAIL_CLEAR;
+  return { minX: -h, maxX: h, minZ: -h, maxZ: h };
 }
 
 function round(v: number): number {

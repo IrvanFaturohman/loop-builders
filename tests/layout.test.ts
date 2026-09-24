@@ -2,82 +2,138 @@ import { describe, expect, it } from 'vitest';
 import { getBuilding } from '../src/config/buildings';
 import { LEVELS } from '../src/config/levels';
 import { completedModuleCount } from '../src/game/building';
-import { plotDistance, plotsOf, trackFor } from '../src/game/economy';
-import { LOT_D, LOT_W, stageCount } from '../src/game/layout';
+import { bandPoints, cutterReach, plotTargets, plotsOf, trackFor } from '../src/game/economy';
+import { LOT_D, LOT_W, RAIL_CLEAR, stageCount, stationPoint, type ResolvedPlot } from '../src/game/layout';
+import type { Vec2 } from '../src/game/types';
 import { fieldFor, initialBlocks } from '../src/game/worldgen';
 
-function lotRect(p: ReturnType<typeof plotsOf>[number]) {
-  const alongX = Math.abs(p.facing.z) > 0.5;
-  const hx = (alongX ? LOT_W : LOT_D) / 2;
-  const hz = (alongX ? LOT_D : LOT_W) / 2;
-  return { minX: p.pos.x - hx, maxX: p.pos.x + hx, minZ: p.pos.z - hz, maxZ: p.pos.z + hz };
+/** Empat sudut kavling (persegi panjang berputar menghadap rel). */
+function lotCorners(p: ResolvedPlot): Vec2[] {
+  const f = p.facing;
+  const t = { x: -f.z, z: f.x };
+  return [
+    [-1, -1],
+    [1, -1],
+    [1, 1],
+    [-1, 1],
+  ].map(([a, b]) => ({ x: p.pos.x + (t.x * a * LOT_W) / 2 + (f.x * b * LOT_D) / 2, z: p.pos.z + (t.z * a * LOT_W) / 2 + (f.z * b * LOT_D) / 2 }));
+}
+
+/** Uji sumbu pemisah untuk dua poligon cembung. */
+function overlaps(a: Vec2[], b: Vec2[]): boolean {
+  for (const poly of [a, b]) {
+    for (let i = 0; i < poly.length; i++) {
+      const p = poly[i];
+      const q = poly[(i + 1) % poly.length];
+      const ax = -(q.z - p.z);
+      const az = q.x - p.x;
+      const proj = (pts: Vec2[]) => pts.map((v) => v.x * ax + v.z * az);
+      const pa = proj(a);
+      const pb = proj(b);
+      if (Math.max(...pa) <= Math.min(...pb) || Math.max(...pb) <= Math.min(...pa)) return false;
+    }
+  }
+  return true;
+}
+
+function inside(poly: Vec2[], x: number, z: number): boolean {
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % poly.length];
+    if ((q.x - p.x) * (z - p.z) - (q.z - p.z) * (x - p.x) < 0) return false;
+  }
+  return true;
+}
+
+function perimeter(poly: Vec2[], step = 0.1): Vec2[] {
+  const out: Vec2[] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % poly.length];
+    const n = Math.ceil(Math.hypot(q.x - p.x, q.z - p.z) / step);
+    for (let k = 0; k < n; k++) out.push({ x: p.x + ((q.x - p.x) * k) / n, z: p.z + ((q.z - p.z) * k) / n });
+  }
+  return out;
 }
 
 describe('tata letak & hutan', () => {
   LEVELS.forEach((level, li) => {
-    it(`${level.id}: loop valid & makin panjang tiap rel baru`, () => {
+    const N = stageCount(level);
+
+    it(`${level.id}: rel cincin searah jarum jam, makin panjang, stasiun di jarak 0`, () => {
       let prev = 0;
-      for (let s = 0; s < stageCount(level); s++) {
+      for (let s = 0; s < N; s++) {
         const t = trackFor(li, s);
         expect(t.clockwise).toBe(true);
         expect(t.length).toBeGreaterThan(prev + 5);
         prev = t.length;
+        const st = stationPoint(level, s);
+        const p0 = t.pointAt(0);
+        expect(Math.hypot(p0.x - st.x, p0.z - st.z)).toBeLessThan(1e-6);
       }
     });
 
-    it(`${level.id}: kavling tidak menimpa rel maupun kavling lain`, () => {
-      const plots = plotsOf(li);
-      const full = trackFor(li, stageCount(level) - 1);
-      const lots = plots.map(lotRect);
-      const pt = { x: 0, z: 0 };
-      for (let d = 0; d < full.length; d += 0.1) {
-        full.pointAt(d, pt);
-        for (const r of lots) expect(pt.x > r.minX - 0.7 && pt.x < r.maxX + 0.7 && pt.z > r.minZ - 0.7 && pt.z < r.maxZ + 0.7).toBe(false);
+    it(`${level.id}: setiap blok terjangkau lengan pemotong Lv1 di sisi kiri rel pitanya`, () => {
+      const f = fieldFor(li);
+      const reach = cutterReach(1);
+      let blocks = 0;
+      for (let c = 0; c < f.n; c++) {
+        if (f.kind[c] < 0) continue;
+        blocks++;
+        const b = f.band[c];
+        expect(b >= 0 && b < N, `sel ${c} di luar pita`).toBe(true);
+        const t = trackFor(li, b);
+        const cell = { x: f.x[c], z: f.z[c] };
+        const { d, gap } = t.closestDistance(cell);
+        expect(gap, `sel ${c} pita ${b}`).toBeLessThan(reach - 0.05);
+        const p = t.pointAt(d);
+        const o = t.outwardAt(d);
+        expect((cell.x - p.x) * o.x + (cell.z - p.z) * o.z).toBeGreaterThan(0);
       }
-      for (let i = 0; i < lots.length; i++)
-        for (let j = i + 1; j < lots.length; j++) {
-          const a = lots[i];
-          const b = lots[j];
-          expect(a.minX < b.maxX && b.minX < a.maxX && a.minZ < b.maxZ && b.minZ < a.maxZ, `kavling ${i} & ${j}`).toBe(false);
-        }
+      expect(blocks).toBeGreaterThan(300);
     });
 
-    it(`${level.id}: jangkar kavling di rel & urut sesuai arah kereta`, () => {
-      for (let s = 0; s < stageCount(level); s++) {
-        const t = trackFor(li, s);
-        const open = plotsOf(li).filter((p) => level.streets[p.street].unlockStage <= s);
-        for (const p of open) expect(t.closestDistance(p.anchor).gap).toBeLessThan(0.02);
-        for (const si of new Set(open.map((p) => p.street))) {
-          const ds = open.filter((p) => p.street === si).map((p) => plotDistance(li, s, p.index));
-          for (let k = 1; k < ds.length; k++) expect(ds[k]).toBeGreaterThan(ds[k - 1]);
-        }
-      }
-    });
-
-    it(`${level.id}: hutan menutupi kavling, rel tahap 0 & lapangan stasiun bersih`, () => {
+    it(`${level.id}: rel berikutnya selalu di lahan pita sebelumnya; rel pertama & alun-alun bersih`, () => {
       const f = fieldFor(li);
       const hp = initialBlocks(li);
-      for (const cells of f.plotCells) {
-        expect(cells.length).toBeGreaterThanOrEqual(2);
-        for (const c of cells) expect(hp[c]).toBeGreaterThan(0);
-      }
-      const t = trackFor(li, 0);
-      const p = { x: 0, z: 0 };
-      for (let d = 0; d < t.length; d += 0.3) {
-        t.pointAt(d, p);
-        const i = Math.floor(p.x + f.half);
-        const j = Math.floor(p.z + f.half);
-        expect(hp[j * f.cols + i]).toBe(-1);
+      for (let c = 0; c < f.n; c++) {
+        const rs = f.railStage[c];
+        if (rs === 0 || f.band[c] < 0) expect(hp[c]).toBe(-1);
+        if (rs >= 1 && f.kind[c] >= 0) expect(f.band[c]).toBe(rs - 1);
       }
       const center = Math.floor(f.half) * f.cols + Math.floor(f.half);
       expect(hp[center]).toBe(-1);
     });
 
-    it(`${level.id}: bangunan langsung tumbuh dari kiriman kecil`, () => {
-      for (const p of plotsOf(li)) {
-        const proj = getBuilding(p.def.building, p.def.variant, p.def.target);
-        expect(proj.costs.reduce((a, b) => a + b, 0)).toBe(proj.target);
-        expect(completedModuleCount(proj, 4)).toBeGreaterThanOrEqual(1);
+    it(`${level.id}: kavling tidak saling menimpa, jauh dari rel, dan di lahan yang sudah bersih`, () => {
+      const f = fieldFor(li);
+      const plots = plotsOf(li);
+      const lots = plots.map(lotCorners);
+      for (let i = 0; i < lots.length; i++)
+        for (let j = i + 1; j < lots.length; j++) expect(overlaps(lots[i], lots[j]), `kavling ${i} & ${j}`).toBe(false);
+      plots.forEach((p, i) => {
+        const edge = perimeter(lots[i]);
+        for (let s = p.district; s < N; s++) {
+          const t = trackFor(li, s);
+          for (const q of edge) expect(t.closestDistance(q).gap, `kavling ${i} vs rel ${s}`).toBeGreaterThan(RAIL_CLEAR);
+        }
+        for (let c = 0; c < f.n; c++) if (inside(lots[i], f.x[c], f.z[c])) expect(f.band[c], `kavling ${i} sel ${c}`).toBeLessThan(p.district);
+      });
+      for (let d = 0; d < N; d++) expect(plots.some((p) => p.district === d)).toBe(true);
+    });
+
+    it(`${level.id}: biaya distrik = hasil pita hutannya; bangunan langsung tumbuh`, () => {
+      const plots = plotsOf(li);
+      const targets = plotTargets(li);
+      const points = bandPoints(li);
+      for (let d = 0; d < N; d++) {
+        const sum = plots.filter((p) => p.district === d).reduce((s, p) => s + targets[p.index], 0);
+        expect(sum).toBe(points[d]);
+      }
+      for (const p of plots) {
+        const proj = getBuilding(p.def.building, p.def.variant, targets[p.index]);
+        expect(proj.target).toBe(targets[p.index]);
+        expect(completedModuleCount(proj, 6)).toBeGreaterThanOrEqual(1);
       }
     });
   });

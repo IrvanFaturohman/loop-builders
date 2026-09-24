@@ -1,6 +1,6 @@
 import { Sfx } from './audio/sfx';
 import { BALANCE } from './config/balance';
-import { addWagon, expandTrack, mergeWagons, nextProject, upgradeCapacity, upgradeSpeed, type ActionResult } from './game/actions';
+import { addCutter, mergeCutters, nextProject, upgradeCapacity, upgradeSpeed, type ActionResult } from './game/actions';
 import { levelDef } from './game/economy';
 import type { GameEvent } from './game/events';
 import { clearSave, loadGame, loadSettings, saveGame, saveSettings, type Settings } from './game/save';
@@ -60,11 +60,10 @@ export class App {
       onCut: (kind) => this.sfx.chop(kind),
     });
     this.hud = new Hud({
-      add: () => this.act(addWagon(this.state, this.events)),
-      merge: () => this.act(mergeWagons(this.state, this.events)),
+      add: () => this.act(addCutter(this.state, this.events)),
+      merge: () => this.act(mergeCutters(this.state, this.events)),
       speed: () => this.act(upgradeSpeed(this.state, this.events)),
       capacity: () => this.act(upgradeCapacity(this.state, this.events)),
-      expand: () => this.doExpand(),
       overview: () => {
         this.sfx.click();
         this.world.toggleOverview(this.state);
@@ -144,44 +143,29 @@ export class App {
   private processEvents(): void {
     if (!this.events.length) return;
     this.world.handleEvents(this.events, this.state);
-    const res = levelDef(this.state).buildResource;
+    const material = levelDef(this.state).material;
     for (const e of this.events) {
       switch (e.type) {
-        case 'cut':
-          if (e.money > 0) this.hud.moneyGain(e.money);
-          break;
-        case 'plotReady':
-          this.sfx.ready();
+        case 'unload':
+          this.sfx.unload(e.points, material);
           if (!this.readyToastShown) {
             this.readyToastShown = true;
-            this.hud.toast(`Lahan bersih! Kereta akan membawa ${res === 'wood' ? 'kayu' : 'batu'} untuk membangun`, 2.8);
+            this.hud.toast('Muatan dibongkar di stasiun dan langsung jadi bangunan kota', 2.8);
           }
-          this.requestSave(0.5);
           break;
         case 'deliver':
-          this.sfx.unload(e.amount, res === 'wood' ? 'wood' : 'brick');
-          this.requestSave(1.5);
-          break;
-        case 'sell':
-          this.sfx.sell(e.money);
-          this.hud.moneyGain(e.money);
-          this.requestSave(1);
-          break;
-        case 'rent':
           this.sfx.rent();
-          this.hud.moneyGain(e.amount);
+          this.hud.moneyGain(e.money);
+          this.requestSave(1.5);
           break;
         case 'plotComplete':
           this.sfx.stageComplete();
-          this.requestSave(0.3);
-          break;
-        case 'streetComplete':
-          this.sfx.merge(4);
           this.hud.moneyGain(e.bonus);
+          this.requestSave(0.3);
           break;
         case 'projectComplete':
           this.sfx.projectComplete();
-          this.hud.moneyGain(e.bonus + e.leftover);
+          this.hud.moneyGain(e.bonus);
           this.releaseBoost();
           this.completeTimer = 2.2;
           this.saveNow();
@@ -204,7 +188,7 @@ export class App {
           break;
         case 'expand':
           this.sfx.expand();
-          this.hud.bought('expand');
+          this.requestSave(0.3);
           break;
         default:
           break;
@@ -226,11 +210,6 @@ export class App {
     this.processEvents();
     this.saveNow();
     return true;
-  }
-
-  private doExpand(): void {
-    if (this.rt.freeze > 0) return;
-    this.act(expandTrack(this.state, this.rt, this.events));
   }
 
   private next(): void {
@@ -416,19 +395,16 @@ export class App {
           boostHold(this.rt, true);
           break;
         case 'a':
-          this.act(addWagon(this.state, this.events));
+          this.act(addCutter(this.state, this.events));
           break;
         case 'm':
-          this.act(mergeWagons(this.state, this.events));
+          this.act(mergeCutters(this.state, this.events));
           break;
         case 's':
           this.act(upgradeSpeed(this.state, this.events));
           break;
         case 'c':
           this.act(upgradeCapacity(this.state, this.events));
-          break;
-        case 'e':
-          this.doExpand();
           break;
         case 'o':
           this.world.toggleOverview(this.state);

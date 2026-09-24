@@ -1,22 +1,24 @@
 import { BALANCE } from '../config/balance';
 import { LEVELS } from '../config/levels';
-import { canAddWagon, canExpand, canMerge, canUpgradeCapacity, canUpgradeSpeed, isLastLevel } from '../game/actions';
+import { canAddCutter, canMerge, canUpgradeCapacity, canUpgradeSpeed, isLastLevel } from '../game/actions';
 import {
   addCost,
+  bandRemaining,
   buildingsDone,
   capacity,
   capacityCost,
   cargoTotal,
-  expandCost,
+  cityProgress,
   findMergePair,
+  forestCleared,
   isPlotComplete,
-  isPlotReady,
-  isPlotUnlocked,
   levelDef,
   mergeCost,
   plotsOf,
   speedCost,
 } from '../game/economy';
+import { stageCount } from '../game/layout';
+import { fieldFor } from '../game/worldgen';
 import type { GameState, Runtime } from '../game/types';
 import { coin, fmt, fmtTime } from './format';
 
@@ -25,7 +27,6 @@ export interface HudHandlers {
   merge(): void;
   speed(): void;
   capacity(): void;
-  expand(): void;
   overview(): void;
   toggleSound(): void;
   openSettings(): void;
@@ -40,10 +41,9 @@ export interface HudContext {
   overview: boolean;
 }
 
-export type PulseTarget = 'add' | 'merge' | 'speed' | 'capacity' | 'expand' | null;
+export type PulseTarget = 'add' | 'merge' | 'speed' | 'capacity' | null;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const RES_LABEL = { wood: 'kayu', stone: 'batu', gem: 'permata' } as const;
 
 export class Hud {
   readonly root = $('hud');
@@ -101,7 +101,6 @@ export class Hud {
     tap(this.btnMerge, () => h.merge());
     tap(this.btnSpeed, () => h.speed());
     tap(this.btnCapacity, () => h.capacity());
-    tap(this.stExpand, () => h.expand());
     tap(this.overviewBtn, () => h.overview());
     tap(this.soundBtn, () => h.toggleSound());
     tap($('btn-settings'), () => h.openSettings());
@@ -154,7 +153,7 @@ export class Hud {
 
   update(state: GameState, rt: Runtime, ctx: HudContext, dt: number): void {
     const level = levelDef(state);
-    const res = level.buildResource;
+    const res = level.material === 'brick' ? 'stone' : 'wood';
     const locked = state.completed;
 
     if (Math.floor(state.money) !== this.shownMoney) {
@@ -181,23 +180,21 @@ export class Hud {
     this.set('pcount', this.pCount, `<b>${b.done}</b>/${b.total} bangunan`);
     this.pFill.style.width = `${((b.done / Math.max(1, b.total)) * 100).toFixed(1)}%`;
     const plots = plotsOf(state.levelIndex);
+    const band = state.expandStage;
+    const bandCells = fieldFor(state.levelIndex).bandCells[band].length;
+    const bandPct = Math.floor((1 - bandRemaining(state, band) / Math.max(1, bandCells)) * 100);
     let stage: string;
     if (state.completed) stage = `<b>Selesai!</b> ${b.total} bangunan berdiri`;
     else {
-      const active = level.streets.findIndex((_, si) => plots.some((p) => p.street === si && isPlotUnlocked(state, p.index) && !isPlotComplete(state, p.index)));
-      if (active < 0) stage = '<b>Buka Rel Baru</b> ke hutan berikutnya';
-      else {
-        const sp = plots.filter((p) => p.street === active);
-        const ready = sp.filter((p) => isPlotReady(state, p.index) && !isPlotComplete(state, p.index)).length;
-        const done = sp.filter((p) => isPlotComplete(state, p.index)).length;
-        stage = `<b>${level.streets[active].name}</b> · ${done}/${sp.length} jadi${ready ? ` · ${ready} sedang dibangun` : ' · tebang lahannya!'}`;
-      }
+      const dp = plots.filter((p) => p.district === band);
+      const done = dp.filter((p) => isPlotComplete(state, p.index)).length;
+      stage = `<b>${level.districts[band].name}</b> · ${done}/${dp.length} jadi · hutan ${bandPct}%`;
     }
     this.set('pstage', this.pStage, stage);
 
     // Hint (teks kecil, tidak memblokir)
     let hint = '';
-    if (!state.completed && rt.fullTime > 4) hint = 'Muatan penuh, gergaji berhenti — naikkan Kapasitas';
+    if (!state.completed && rt.fullTime > 4) hint = 'Muatan penuh, pemotong berhenti — naikkan Kapasitas';
     this.set('hint', this.hintEl, hint);
     this.hintEl.hidden = hint === '';
 
@@ -218,11 +215,11 @@ export class Hud {
     this.boostFill.style.width = `${(bs.energy * 100).toFixed(1)}%`;
 
     // Tombol utama
-    const full = state.train.wagons.length >= BALANCE.maxWagons;
-    this.priceBtn('add', this.addCostEl, this.btnAdd, full ? null : addCost(state), canAddWagon(state).ok, locked, `${state.train.wagons.length}/${BALANCE.maxWagons}`);
+    const full = state.train.cutters.length >= BALANCE.maxCutters;
+    this.priceBtn('add', this.addCostEl, this.btnAdd, full ? null : addCost(state), canAddCutter(state).ok, locked, `${state.train.cutters.length}/${BALANCE.maxCutters}`);
     const pair = findMergePair(state);
     if (pair) {
-      const lv = state.train.wagons[pair[0]];
+      const lv = state.train.cutters[pair[0]];
       this.set('merge', this.mergeSub, `Lv${lv}→${lv + 1} ${coin(mergeCost(state))}`);
     } else this.set('merge', this.mergeSub, '2 setingkat');
     this.cls(this.btnMerge, 'locked', locked || !canMerge(state).ok);
@@ -230,20 +227,17 @@ export class Hud {
     this.priceBtn('speed', this.speedCostEl, this.btnSpeed, speedCost(state), canUpgradeSpeed(state).ok, locked);
     this.priceBtn('cap', this.capacityCostEl, this.btnCapacity, capacityCost(state), canUpgradeCapacity(state).ok, locked);
 
-    // Panel rel baru
-    const ec = expandCost(state);
-    const next = level.streets.find((s) => s.unlockStage === state.expandStage + 1);
-    if (ec === null || !next) {
-      this.set('stinfo', this.stInfo, `<div class="st-name">Semua jalur terbuka</div><div class="st-meta">Selesaikan semua bangunan ${RES_LABEL[res]}</div>`);
-      this.set('stx', this.stExpand, 'Rel Maks');
-      this.cls(this.stExpand, 'max', true);
-      this.cls(this.stExpand, 'locked', false);
-    } else {
-      this.set('stinfo', this.stInfo, `<div class="st-name">Rel Baru → ${next.name}</div><div class="st-meta">${next.plots.length} kavling baru di hutan</div>`);
-      this.set('stx', this.stExpand, `Buka Rel<small>${coin(ec)}</small>`);
-      this.cls(this.stExpand, 'max', false);
-      this.cls(this.stExpand, 'locked', locked || !canExpand(state).ok);
-    }
+    // Panel progres: rel melebar sendiri saat pita hutan bersih
+    const N = stageCount(level);
+    const last = band >= N - 1;
+    this.set(
+      'stinfo',
+      this.stInfo,
+      `<div class="st-name">Cincin ${band + 1}/${N} · Kota ${Math.floor(cityProgress(state) * 100)}%</div><div class="st-meta">${last ? 'Tebang sisa hutan untuk menyelesaikan kota' : 'Rel melebar sendiri saat hutan di luar rel bersih'}</div>`,
+    );
+    this.set('stx', this.stExpand, `Bersih<small>${Math.floor(forestCleared(state) * 100)}%</small>`);
+    this.cls(this.stExpand, 'max', true);
+    this.cls(this.stExpand, 'locked', false);
 
     for (const [k, el] of Object.entries(this.targets())) this.cls(el, 'pulse', this.pulseTarget === k);
     if (this.toastTimer > 0) {
@@ -256,7 +250,7 @@ export class Hud {
   }
 
   private targets(): Record<Exclude<PulseTarget, null>, HTMLElement> {
-    return { add: this.btnAdd, merge: this.btnMerge, speed: this.btnSpeed, capacity: this.btnCapacity, expand: this.stExpand };
+    return { add: this.btnAdd, merge: this.btnMerge, speed: this.btnSpeed, capacity: this.btnCapacity };
   }
 
   private afford(btn: HTMLElement, ratio: number, show: boolean): void {
@@ -295,7 +289,7 @@ export class Hud {
     const app = this.root.getBoundingClientRect();
     const bar = this.stationBar.getBoundingClientRect();
     const side = bar.width < app.width * 0.9 && bar.left > app.left + app.width * 0.4;
-    const top = side || t === 'expand' ? r.top : Math.min(r.top, bar.top);
+    const top = side ? r.top : Math.min(r.top, bar.top);
     return { x: r.left - app.left + r.width / 2, y: top - app.top - 10 };
   }
 
