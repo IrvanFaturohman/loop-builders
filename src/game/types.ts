@@ -1,10 +1,16 @@
 /**
  * Struktur data inti permainan. Semua yang ada di sini murni data (tanpa Three.js / DOM),
  * sehingga logika simulasi bisa diuji di Node dan disimpan ke localStorage.
+ *
+ * Konsep "Kota Bercabang": pabrik (depot) di tengah dikelilingi jalan persegi. Setiap jalan
+ * baru tumbuh keluar dari salah satu sisi depot sebagai jalan dua lajur dengan kavling di kedua
+ * sisinya. Secara teknis seluruh jaringan tetap SATU loop tertutup (keliling depot + setiap
+ * jalan keluar-masuk), jadi aturan crossing/pickup tetap sederhana dan teruji.
  */
 
 export type MaterialKind = 'wood' | 'brick';
 export type ThemeKind = 'forest' | 'meadow' | 'city';
+export type HubSide = 'N' | 'E' | 'S' | 'W';
 
 export interface Vec2 {
   x: number;
@@ -15,53 +21,56 @@ export interface Vec2 {
 // Definisi konten (config, tidak disimpan)
 // ---------------------------------------------------------------------------
 
-/** Satu konfigurasi bentuk lintasan (expand tahap 0/1/2). */
-export interface TrackStageDef {
-  /**
-   * Titik sudut poligon tertutup, searah jalannya kendaraan. Titik pertama WAJIB titik bongkar
-   * (berada di tengah ruas lurus) karena jarak 0 lintasan = titik bongkar.
-   */
-  corners: [number, number][];
-  /** Radius lengkung tiap sudut (titik pertama diabaikan). */
-  radius: number;
-  /** Batas jumlah kendaraan pada panjang lintasan ini. */
-  maxVehicles: number;
+/** Satu kavling bangunan di sisi luar jalan. */
+export interface PlotDef {
+  /** 'out' = lajur berangkat, 'ret' = lajur pulang, 'end' = ujung jalan (di balik putaran U). */
+  lane: 'out' | 'ret' | 'end';
+  /** Jarak dari pangkal jalan (sisi depot) untuk lajur out/ret. Diabaikan untuk 'end'. */
+  at: number;
+  /** Id tipe bangunan (lihat config/buildings). */
+  building: string;
+  /** Indeks varian warna. */
+  variant: number;
+  /** Material yang dibutuhkan. */
+  target: number;
+  /** Uang sewa setiap kali truk melewati bangunan yang sudah jadi. */
+  rent: number;
 }
 
-/** Slot stasiun produksi di tepi lintasan. */
-export interface StationSlotDef {
+export interface StreetDef {
   name: string;
-  /** Tahap expand saat slot ini terbuka (0 = dari awal). */
+  /** Sisi depot tempat jalan tumbuh. */
+  side: HubSide;
+  /** Panjang jalan dari pangkal ke ujung. */
+  length: number;
+  /** Tahap expand saat jalan ini dibuka (0 = sejak awal). */
   unlockStage: number;
-  /** Posisi pusat mesin (dunia). */
-  machine: [number, number];
-  /** Posisi pusat penyimpanan (dunia) — harus tepat di tepi jalan. */
-  storage: [number, number];
-  /** Biaya membangun mesin (slot 0 sudah terbangun gratis). */
-  buildCost: number;
+  plots: PlotDef[];
 }
 
-export interface LevelDefinition {
+export interface CityDefinition {
   id: string;
-  areaName: string;
+  name: string;
   theme: ThemeKind;
   material: MaterialKind;
-  projectId: string;
-  /** Posisi & rotasi (radian) bangunan. */
-  housePos: [number, number];
-  houseRotation: number;
-  trackStages: TrackStageDef[];
-  slots: StationSlotDef[];
-  /** Biaya expand ke tahap 1, 2, ... */
+  /** Setengah sisi persegi jalan keliling depot (garis tengah jalan). */
+  hubHalf: number;
+  /** Setengah jarak antar lajur sebuah jalan (garis tengah ke garis tengah). */
+  laneHalf: number;
+  /** Radius lengkung sudut jalan. */
+  radius: number;
+  streets: StreetDef[];
+  /** Biaya expand ke tahap 1, 2, ... (panjang = jumlah tahap − 1). */
   expandCosts: number[];
-  /** Pengali seluruh biaya (Add, upgrade) level ini. */
+  /** Biaya mesin ke-1..4 (mesin pertama gratis). */
+  machineCosts: number[];
   costScale: number;
-  /** Uang per material yang benar-benar sampai di bangunan. */
   moneyPerUnit: number;
-  /** Stok awal penyimpanan pertama supaya pengiriman pertama cepat terlihat. */
-  startStorage: number;
-  /** Interval produksi dasar (detik per item) pada Produksi Lv. 1. */
   baseInterval: number;
+  startStorage: number;
+  /** Bonus saat semua bangunan di satu jalan selesai (per jalan, urut definisi). */
+  streetBonus: number[];
+  completionBonus: number;
 }
 
 /** Primitive geometri bangunan (koordinat lokal bangunan, satuan dunia). */
@@ -93,7 +102,7 @@ export type PrimShape =
       seg?: number;
     }
   | {
-      /** Prisma segitiga (dinding gable): alas w di sumbu x, tinggi h di y, tebal d di z. */
+      /** Prisma segitiga: alas w di sumbu x, tinggi h di y, tebal d di z. */
       kind: 'prism';
       p: [number, number, number];
       w: number;
@@ -115,6 +124,7 @@ export type PrimShape =
       h: number;
       c: string;
       seg?: number;
+      r?: [number, number, number];
     };
 
 export interface ModuleDef {
@@ -132,9 +142,6 @@ export interface ProjectDefinition {
   /** Total material yang dibutuhkan. */
   target: number;
   stageNames: string[];
-  /** Bonus uang saat tahap ke-i selesai (tahap terakhir memakai completionBonus). */
-  stageBonus: number[];
-  completionBonus: number;
   modules: ModuleDef[];
 }
 
@@ -143,10 +150,6 @@ export interface FinalProject extends ProjectDefinition {
   costs: number[];
   /** thresholds[i] = total material sampai modul i selesai (inklusif). */
   thresholds: number[];
-  /** stageEnd[s] = total material saat seluruh tahap s selesai. */
-  stageEnd: number[];
-  /** Indeks modul pertama tiap tahap. */
-  stageFirstModule: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -163,20 +166,21 @@ export interface Vehicle {
   distance: number;
 }
 
-export interface Station {
-  slot: number;
-  built: boolean;
-  /** Produksi Lv. */
+/** Pabrik pusat: beberapa jalur mesin + conveyor mengisi SATU penyimpanan bersama. */
+export interface Depot {
+  /** Produksi Lv (berlaku untuk semua mesin). */
   level: number;
+  /** Jumlah mesin aktif (1..4). */
+  machines: number;
   /** Stok yang SUDAH masuk penyimpanan (satu-satunya yang boleh diambil kendaraan). */
   storage: number;
   /**
-   * Item yang masih di conveyor: progress 0..1 (1 = tiba di penyimpanan).
-   * Invarian: storage + conveyor.length <= storageCapacity.
+   * Item di conveyor tiap mesin: progress 0..1 (1 = tiba di penyimpanan).
+   * Invarian: storage + total item di semua conveyor <= kapasitas.
    */
-  conveyor: number[];
-  /** Akumulator waktu produksi (detik). */
-  timer: number;
+  lines: number[][];
+  /** Akumulator waktu produksi per mesin (detik). */
+  timers: number[];
 }
 
 export interface TutorialFlags {
@@ -184,7 +188,7 @@ export interface TutorialFlags {
   add: boolean;
   merge: boolean;
   expand: boolean;
-  build: boolean;
+  machine: boolean;
   upgrade: boolean;
 }
 
@@ -192,26 +196,27 @@ export interface GameStats {
   levelTime: number;
   totalTime: number;
   totalDelivered: number;
-  /** Uang dari penjualan sisa material saat proyek selesai (untuk layar hasil). */
+  totalRent: number;
   lastLeftoverMoney: number;
   lastCompletionBonus: number;
 }
 
 export interface GameState {
+  /** Indeks kota (level). */
   levelIndex: number;
-  /** Berapa kali seluruh daftar level sudah diputari (untuk skala kesulitan). */
+  /** Berapa kali seluruh daftar kota sudah diputari (skala kesulitan). */
   cycle: number;
   money: number;
-  /** Material yang sudah terpasang di bangunan aktif. */
-  delivered: number;
-  /** Jumlah tahap yang bonusnya sudah dibayar. */
-  stagesPaid: number;
+  /** Material terpasang per kavling (urutan: jalan demi jalan, kavling demi kavling). */
+  plots: number[];
+  /** Jalan yang bonusnya sudah dibayar. */
+  streetsPaid: boolean[];
   completed: boolean;
   expandStage: number;
   addsPurchased: number;
   vehicles: Vehicle[];
   nextVehicleId: number;
-  stations: Station[];
+  depot: Depot;
   tutorial: TutorialFlags;
   stats: GameStats;
 }
@@ -237,7 +242,7 @@ export interface Runtime {
   boost: BoostState;
   /** Detik kendaraan dibekukan (animasi expand). */
   freeze: number;
-  /** Rasio muatan per pengiriman terakhir (untuk hint bottleneck). */
+  /** Rasio muatan saat meninggalkan depot (untuk hint bottleneck). */
   recentLoads: number[];
   /** Rata-rata bergerak rasio isi penyimpanan. */
   storageFill: number;

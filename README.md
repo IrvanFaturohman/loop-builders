@@ -1,12 +1,10 @@
-# Loop Builders
+# Loop Builders — Kota Bercabang
 
-**Main sekarang:** https://irvanfaturohman.github.io/loop-builders/
+Game web 3D idle/clicker satu tangan (Vite + TypeScript + Three.js). Pabrik di tengah kota memproduksi bahan bangunan. Truk mainan mengambilnya di teluk muat, lalu berkeliling jalan yang bercabang ke empat arah untuk membangun rumah-rumah di kedua sisi jalan. Setiap rumah yang sudah jadi membayar **sewa** tiap kali truk lewat. Ini "reward line" ala Galactic Merge, hanya saja di sini jumlahnya bertambah seiring kota tumbuh.
 
-Game web 3D idle/clicker satu tangan (Vite + TypeScript + Three.js). Kendaraan mainan berputar di satu loop tertutup, mengambil material dari penyimpanan mesin produksi, lalu membongkar semua muatan sekaligus untuk membangun rumah. Siluet rumah target terlihat sejak awal dan berubah dari ghost menjadi solid modul demi modul.
+Semua visual dibuat prosedural dengan geometri Three.js, dan semua suara disintesis dengan Web Audio. Tidak ada aset eksternal, backend, login, iklan, atau pembayaran.
 
-Semua visual dibuat secara prosedural dengan geometri Three.js, dan semua suara disintesis dengan Web Audio. Tidak ada aset eksternal, backend, login, iklan, atau pembayaran.
-
-![Level 1 awal](docs/screenshots/01-level1-awal.png) ![Level 1 setelah dua kali expand](docs/screenshots/02-level1-expand2.png) ![Rumah selesai](docs/screenshots/03-selesai.png) ![Level 3 kota](docs/screenshots/04-level3-kota.png)
+![Dua jalan pertama](docs/screenshots/01-dua-jalan.png) ![Jalan bercabang](docs/screenshots/02-jalan-bercabang.png) ![Desa selesai](docs/screenshots/03-desa-selesai.png) ![Kota bata](docs/screenshots/04-kota-bata.png)
 
 ## Menjalankan
 
@@ -17,134 +15,112 @@ npm run build    # type-check (tsc) + build produksi ke dist/
 npm run preview  # menyajikan hasil build
 npm test         # unit test (Vitest)
 npm run check    # tsc --noEmit + semua tes
-npm run balance  # bot pacing: cetak timeline ketiga level
+npm run balance  # bot pacing: cetak timeline kedua kota
+npm run deploy   # build + publikasikan dist/ ke branch gh-pages (GitHub Pages)
 ```
 
 Butuh Node 18+ dan browser dengan WebGL. Tambahkan `?frame=390x844` pada URL untuk memaksa ukuran kontainer ponsel di desktop (khusus pengujian).
-
-### Deploy ke GitHub Pages
-
-```bash
-npm run deploy   # build + push isi dist/ ke branch gh-pages
-```
-
-Pages menyajikan branch `gh-pages` (root). `vite.config.ts` memakai `base: './'`, jadi build bisa dibuka dari subfolder `/<nama-repo>/`. Setelah push, perubahan biasanya tayang dalam 1–2 menit.
 
 ## Kontrol
 
 | Aksi | Sentuh / mouse | Keyboard |
 | --- | --- | --- |
-| Ngebut (boost) | Ketuk area dunia untuk dorongan singkat, tahan untuk mempertahankan (batas energi ±7 detik, meter biru) | Tahan `Spasi` |
-| Tambah kendaraan | Tombol **Tambah Kendaraan** | `A` |
-| Gabung | Tombol **Gabung** (pasangan termurah), atau ketuk kendaraan lalu ketuk kendaraan lain yang setingkat | `M` |
-| Perluas jalur | Tombol **Perluas Jalur** | `E` |
-| Pilih stasiun | Ketuk mesin/penyimpanan di dunia, atau tab 1/2/3 di panel stasiun | `1` `2` `3` |
-| Upgrade / bangun mesin | Tombol hijau di panel stasiun, atau tombol **Bangun Mesin** di slot | `U` |
-| Proyek berikutnya | Tombol di panel selesai | `Enter` |
-| Suara & reset | Ikon speaker (mute cepat) dan ikon gir (pengaturan, reset dengan konfirmasi) | `Esc` menutup |
+| Ngebut (boost) | Ketuk area dunia untuk dorongan singkat, tahan untuk mempertahankan (batas energi ±7 dtk, meter biru) | Tahan `Spasi` |
+| Geser kamera | Seret jari/mouse di area dunia | — |
+| Zoom | Cubit dua jari / scroll mouse | — |
+| Lihat seluruh kota | Tombol peta di kanan atas | `O` |
+| Tambah truk | **Tambah Kendaraan** | `A` |
+| Gabung | **Gabung** (pasangan termurah), atau ketuk truk lalu truk lain yang setingkat | `M` |
+| Buka jalan | **Jalan Baru** | `E` |
+| Pabrik | **Produksi Lv.** (lebih cepat) dan **+ Mesin** (tambah jalur conveyor) | `U` / `N` |
+| Kota berikutnya | Tombol di panel selesai | `Enter` |
 
-Ketukan pada tombol HUD, kendaraan, atau stasiun tidak memicu boost.
+Ketukan pada tombol HUD atau truk tidak memicu boost. Seretan lebih dari 12 px otomatis berubah dari boost menjadi geser kamera.
 
 ## Loop permainan
 
-1. **Mesin** memproduksi satu material per interval. Item berjalan di **conveyor**, lalu baru masuk **penyimpanan**. Hanya stok di penyimpanan yang bisa diambil kendaraan.
-2. Mesin hanya melahirkan item jika `stok + item di conveyor < kapasitas`. Artinya ruang dipesan sejak item lahir. Saat penuh, lampu mesin merah, gergaji berhenti, dan label berubah menjadi **PENUH**.
-3. **Kendaraan** berkeliling dengan urutan bongkar → A → B → C → bongkar. Di tiap stasiun, jumlah yang diambil adalah `min(stok, kapasitas − muatan)`. Kendaraan yang penuh lewat tanpa mengambil.
-4. Di **titik bongkar**, seluruh muatan langsung masuk progres dalam satu langkah logika. Material terbang, debu, dan pop modul hanya efek visual yang tidak menahan logika. Uang = 1 per material (bata di kota = 2) ditambah bonus tiap tahap.
-5. **Add**, **Merge** (kapasitas Lv1–Lv6 = 4/10/24/55/120/260), **Produksi Lv.** (+50% throughput dan +4 kapasitas penyimpanan per level), serta **Perluas Jalur** (2× per level) yang memperpanjang loop dan membuka slot mesin baru. Expand tidak mengubah rumah, target, progres, atau muatan.
-6. Setelah bangunan selesai: confetti, kamera menyorot rumah tanpa ghost, sisa material dijual, lalu tombol **Proyek Berikutnya**.
+1. **Pabrik** (1–4 mesin) memproduksi material. Item berjalan di conveyor, lalu masuk ke **satu penyimpanan bersama**. Hanya stok yang sudah tiba di penyimpanan yang bisa diambil. Ruang penyimpanan dipesan sejak item lahir; saat penuh mesin berhenti dan label berubah menjadi **PENUH**.
+2. Jalan mengelilingi pabrik, dan di tiap sisinya ada **teluk muat** kuning. Jumlah yang diambil truk adalah `min(stok, kapasitas − muatan)`, jadi truk mengisi ulang sebelum masuk ke setiap jalan.
+3. Setiap **jalan** keluar dari sisi pabrik sebagai dua lajur (berangkat dan pulang) dengan putaran U di ujungnya. Kavling berjajar di kedua sisi jalan dan satu lagi di ujungnya.
+4. Truk yang melintasi kavling:
+   - **belum jadi** → truk menurunkan bahan sebanyak yang masih dibutuhkan (isi-dulu), dan sisanya dibawa ke kavling berikutnya. Modul bangunan langsung berubah dari ghost menjadi solid (fondasi → dinding → bukaan → atap → detail). +1 uang per kayu (+2 per bata).
+   - **sudah jadi** → sewa dibayar setiap kali truk lewat, dengan koin yang pop dan nadanya naik beruntun.
+5. **Jalan Baru** (3× per kota) menumbuhkan jalan berikutnya dengan animasi dan membuka 3–5 kavling baru. Progres, muatan, dan jumlah truk tidak berubah.
+6. Bonus diberikan saat satu jalan lengkap. Kota selesai saat semua bangunan berdiri: confetti, kamera menyorot seluruh kota, sisa material dijual, lalu tombol **Kota Berikutnya**.
 
-Hint kecil di bawah kartu proyek menjelaskan bottleneck: "Kendaraan sering kosong" berarti produksi kurang, "Kayu menumpuk" berarti armada kurang. Tutorial singkat (boost → gabung → tambah → perluas → bangun mesin → upgrade) muncul satu per satu, hanya saat relevan, dan tidak pernah memblokir permainan.
+Bottleneck ditandai hint kecil. "Truk berangkat setengah kosong" berarti pabrik kurang cepat. "Kayu menumpuk di pabrik" berarti armada kurang.
 
 ## Konten
 
-| Level | Area | Material | Proyek | Target |
+| Kota | Tema | Material | Jalan (utara → selatan → timur → barat) | Bangunan |
 | --- | --- | --- | --- | --- |
-| 1 | Hutan Cerah | Kayu | Kabin Kayu Mungil (log cabin, atap pelana merah, teras, cerobong batu) | 460 |
-| 2 | Pinggir Hutan | Kayu | Rumah Kayu Dua Lantai (gable depan, sayap, balkon, siding) | 1.200 |
-| 3 | Pinggir Kota | Bata | Rumah Bata Kota (3 lantai, atap datar, parapet, tangki air) | 1.800 |
+| 1 · Desa Kayu Rimbun | Hutan | Kayu | Cemara, Pinus, Mahoni, Jati | Rumah kayu, rumah papan, warung, rumah panggung, lumbung, rumah loteng, menara air |
+| 2 · Kota Bata Senja | Kota | Bata | Merdeka, Sudirman, Thamrin, Diponegoro | Rumah bata, toko roti, ruko, rumah bata tingkat, apartemen, menara jam |
 
-Setiap proyek terdiri dari 68–120 modul dengan urutan fondasi → dinding → rangka/bukaan → atap → detail. Setelah level 3, permainan berputar kembali ke level 1 dengan target dan harga ×1,6.
+Masing-masing kota berisi 18 bangunan. Setelah kota 2, permainan berputar kembali ke kota 1 dengan target, harga, dan sewa ×1,6.
 
-## Angka awal (Level 1)
+## Angka awal (Kota 1)
 
 | Parameter | Nilai |
 | --- | --- |
-| Target kayu | 460 (disesuaikan dari referensi 160–200 agar kedua expand sempat dipakai) |
-| Mesin pertama | 1 kayu / 0,8 dtk; penyimpanan 12; stok awal 4 |
-| Kendaraan awal | 1× Lv1 (kapasitas 4); kecepatan 4,3 u/dtk; loop awal ±4,5 dtk |
-| Add | 10, lalu ×1,5 per pembelian |
-| Upgrade produksi | 16, lalu ×1,72 per level (+50% throughput) |
-| Expand 1 / 2 | 30 / 70 |
-| Mesin ke-2 / ke-3 | 20 / 40 |
-| Boost | +70%, ketuk = 0,65 dtk, tahan hingga energi habis (±7 dtk), isi ulang ±4,5 dtk |
-| Bonus tahap | 10 / 20 / 30 / 40, bonus selesai 80 |
+| Truk awal | 1× Lv1 (kapasitas 4); kecepatan 5 u/dtk; kapasitas Lv1–Lv6 = 4/10/24/55/120/260 |
+| Pabrik | 1 mesin, 1 item / 0,8 dtk; penyimpanan 12 (+4 per level, +6 per mesin) |
+| Add | 10, lalu ×1,45 per pembelian |
+| Produksi Lv. | 16, lalu ×1,7 per level (+40% per level) |
+| Mesin ke-2/3/4 | 25 / 70 / 160 |
+| Jalan Baru | 30 / 90 / 150 |
+| Bangunan | 20–81 kayu; sewa 1–5 per truk lewat |
 
-Hasil `npm run balance` (bot tanpa boost yang membeli opsi termurah sesuai bottleneck): Level 1 selesai ±2,7 menit (pengiriman pertama di detik ke-4, Add di detik ke-13, Merge ke-14, Expand 1 ke-60, Expand 2 ke-127). Level 2 selesai ±4,5 menit dan Level 3 ±5,8 menit. Pemain sungguhan biasanya sedikit lebih lambat, dan boost bisa mengimbanginya.
+Hasil `npm run balance` (bot tanpa boost): kiriman pertama di detik ke-1, rumah pertama jadi ±17 dtk, sewa pertama ±24 dtk, Add dan Gabung ±14 dtk, jalan ke-2 ±55 dtk. Kota 1 selesai ±3,6 menit dan Kota 2 ±3,7 menit, dengan sewa menyumbang sekitar 2/3 pemasukan. Pemain manusia biasanya lebih lambat dari bot.
 
-Semua angka global ada di `src/config/balance.ts`, sedangkan angka per level ada di `src/config/levels.ts`.
+Semua angka global ada di `src/config/balance.ts`. Kota, jalan, kavling, dan harga ada di `src/config/cities.ts`. Tipe bangunan ada di `src/config/buildings/`.
 
 ## Arsitektur
 
 ```
 src/
-  config/        balance.ts (angka global), levels.ts (lintasan, slot, harga), projects/ (modul bangunan)
+  config/        balance.ts, cities.ts (kota/jalan/kavling/harga), buildings/ (generator bangunan)
   game/          logika murni, tanpa Three.js/DOM, dapat diuji di Node
-    types.ts       GameState, Vehicle, Station, LevelDefinition, TrackStageDef, ProjectDefinition...
-    track.ts       TrackPath (poligon bersudut bulat, panjang eksak), computeCrossings, StageMapping
-    sim.ts         step(): boost, produksi/conveyor, gerak kendaraan, pickup, bongkar, bonus
-    actions.ts     add, merge, upgrade, bangun mesin, expand, proyek berikutnya
-    economy.ts     rumus harga/kapasitas/laju + akses konteks level
-    building.ts    pemetaan material → modul (ambang kumulatif)
-    save.ts        save/load localStorage dengan versi skema, validasi, dan cadangan save rusak
-  render/        Three.js: world.ts (orkestrasi), trackView, stationView, vehicleView,
-                 buildingView (ghost/solid), environment, effects (pool partikel), cameraRig, labels
-  audio/sfx.ts   synthesizer Web Audio (compressor, batas voice, cooldown)
+    layout.ts      titik sudut loop per tahap, posisi kavling & teluk muat
+    track.ts       TrackPath (poligon bersudut bulat), computeCrossings, StageMapping
+    sim.ts         boost, pabrik multi-mesin, gerak truk, pickup, kirim, sewa, bonus
+    actions.ts     add, merge, produksi, mesin, jalan baru, kota berikutnya
+    economy.ts     rumus + akses konteks kota
+    save.ts        save/load (skema v2) + validasi + cadangan save rusak
+  render/        world.ts, trackView (jalan + morph), depotView, plotView, buildingView (ghost/solid),
+                 vehicleView, stationView (jalur mesin), environment, effects, cameraRig (fit/geser/zoom)
+  audio/sfx.ts   synthesizer Web Audio (compressor, batas voice, cooldown, koin sewa berantai)
   ui/            hud.ts, tutorial.ts, format.ts
-  app.ts         loop (dt dibatasi + sub-step), event → render/audio/HUD, input, autosave
+  app.ts         loop, event → render/audio/HUD, input (boost, geser, cubit), autosave
 ```
 
-Bagian yang rawan bug diberi komentar di kode:
+Seluruh jaringan jalan secara teknis tetap **satu loop tertutup**: mengelilingi pabrik, ditambah setiap jalan yang keluar lalu kembali. Karena itu aturan crossing di `track.ts` tetap sederhana dan teruji. Sebuah titik (teluk atau kavling) dianggap dilewati jika berada di interval setengah-terbuka `(prev, prev+move]` sepanjang arah jalan, sehingga boost tidak bisa melompatinya dan tidak ada pemicu ganda. Saat jalan baru dibuka, `StageMapping` memetakan posisi truk ke loop baru dengan menjaga urutan relatif terhadap teluk dan kavling lama, dan jalannya di-morph selama ±1,15 dtk.
 
-- **Crossing** (`track.ts`): titik dianggap dilewati jika berada di interval setengah-terbuka `(prev, prev+move]` modulo panjang loop, diurutkan sepanjang arah jalan. Tidak ada pemeriksaan jarak mentah, sehingga boost atau langkah besar tidak bisa melompati trigger dan tidak ada trigger ganda.
-- **Buffer conveyor** (`sim.ts`): kapasitas dipesan saat item lahir.
-- **Expand** (`track.ts` StageMapping): bagian lintasan yang identik dipetakan 1:1 dan bagian yang berubah dipetakan proporsional. Urutan relatif kendaraan terhadap titik bongkar/pickup tetap sama, lalu jalan di-morph ±1,15 dtk memakai pemetaan yang sama.
-- **Ghost** (`buildingView.ts`): prepass kedalaman dengan polygonOffset, lalu warna transparan satu lapis dan garis tepi. Ghost sebuah modul disembunyikan tepat saat solidnya mulai muncul, sehingga tidak ada siluet dobel atau z-fighting.
+## Menambah kota / bangunan
 
-Performa: ghost dan solid bangunan digabung per frame yang berubah (±4 draw call), sedangkan pohon, semak, item, dan partikel memakai InstancedMesh. Satu frame level penuh sekitar 70–90 draw call. Device pixel ratio dibatasi 2, delta time dibatasi 0,1 dtk dengan sub-step 1/30, dan simulasi berhenti saat tab tersembunyi.
-
-## Menambah level
-
-1. Buat builder proyek baru di `src/config/projects/namaProyek.ts` yang mengembalikan `ProjectDefinition`. Susun modul dengan `ProjectBuilder.mod(tahap, bobot, ...prims)`, urut dari bawah ke atas. Biaya tiap modul dihitung otomatis dari bobot agar totalnya tepat sama dengan `target`.
-2. Daftarkan builder itu di `src/config/projects/index.ts`.
-3. Tambahkan objek ke `LEVELS` di `src/config/levels.ts`:
-   - `trackStages`: tiga konfigurasi lintasan. Titik pertama adalah titik bongkar dan harus berada di tengah ruas lurus. Helper `rectStage()` tersedia.
-   - `slots`: posisi mesin dan penyimpanan. Penyimpanan harus di tepi jalan dan urutannya searah jalan.
-   - Harga: `expandCosts`, `costScale`, `moneyPerUnit`, `baseInterval`, `startStorage`.
-   - `theme`: `forest`, `meadow`, atau `city`. Palet warnanya ada di `src/render/palette.ts`.
-4. Jalankan `npm test`. `tests/content.test.ts` memvalidasi otomatis bahwa penyimpanan menempel di jalan, mesin tidak menimpa jalan, urutan bongkar → A → B → C benar, loop membesar tiap tahap, dan pengiriman pertama sudah mengubah rumah.
+1. **Tipe bangunan baru**: tambahkan entri di `BUILDINGS` pada `src/config/buildings/index.ts`. Pakai generator parametrik `house()` (dinding log/papan/bata, 1–4 lantai, atap pelana/datar, panggung, kanopi, balkon, papan nama), atau tulis generator sendiri seperti `waterTower()`.
+2. **Kota baru**: salin satu objek di `CITIES` (`src/config/cities.ts`). Isi tiap jalan dengan `side` (N/E/S/W), `length` (6,6 untuk dua kavling per sisi, 4,3 untuk satu), `unlockStage`, lalu kavling `P(lajur, jarak, tipe, varian, target, sewa)`.
+3. Jalankan `npm test`. `tests/layout.test.ts` otomatis memeriksa bahwa kavling tidak menimpa jalan maupun kavling lain, titik jangkar tepat di lajur, urutan kavling sesuai arah truk, loop makin panjang tiap jalan baru, dan kiriman kecil pertama langsung menumbuhkan bangunan.
 
 ## Pengujian
 
-`npm test` menjalankan 38 tes:
+`npm test` menjalankan 39 tes:
 
-- **Crossing**: interval setengah-terbuka, wrap di ujung loop, langkah besar/boost, dan jumlah trigger yang sama untuk berbagai ukuran langkah.
-- **Pickup**: `min(stok, sisa kapasitas)`, stok 3 hanya menyuplai 3, kapasitas 4 tidak pernah terlampaui, dan item di conveyor tidak bisa diambil.
-- **Buffer**: mesin berhenti saat penuh, dan invarian stok+conveyor tidak pernah melebihi kapasitas.
-- **Bongkar**: tepat sekali per putaran, seluruh muatan masuk, dan kelebihan setelah target dijual.
-- **Boost**: tidak menghilangkan pickup/bongkar.
-- **Merge**: muatan terjaga, jumlah kendaraan berkurang, dan overflow bila config diubah.
-- **Expand**: progres, proyek, dan muatan tidak berubah, loop lebih panjang, urutan relatif terjaga, dan tetap satu bongkar per putaran.
-- **Save/load**: round-trip, save rusak, level selesai tetap selesai, dan clamp nilai.
-- **Konten**: validasi tata letak level, pemetaan modul, serta bot pacing ketiga level.
+- **Crossing**: wrap di ujung loop, boost/langkah besar, dan jumlah pemicu yang sama untuk berbagai ukuran langkah.
+- **Tata letak kota**: semua tahap dan kedua kota.
+- **Pickup**: `min(stok, sisa kapasitas)`, dan item di conveyor tidak bisa diambil.
+- **Pabrik**: multi-mesin berhenti saat penuh tanpa kehilangan item, dan invarian stok+conveyor ≤ kapasitas.
+- **Kavling**: isi-dulu, sisa muatan lanjut ke kavling berikutnya, sewa dibayar hanya oleh bangunan yang sudah jadi, bonus jalan dibayar sekali, dan penyelesaian kota menjual sisa material.
+- **Aksi**: merge (muatan utuh + overflow), mesin maksimal 4, jalan baru tidak mereset progres atau muatan dan menjaga urutan truk.
+- **Save/load**: round-trip, save rusak atau versi lama, kota selesai tetap selesai, dan clamp nilai.
+- **Pacing**: bot kedua kota.
 
-Selain itu, game sudah diuji di Chrome headless (viewport 390×844 sentuh, 360×740, 430×932, landscape 844×390, dan desktop 1280×720). Yang dicoba: boost tap/tahan, Add, Gabung lewat tombol dan lewat ketuk dua kendaraan, dua kali expand dan bangun mesin, upgrade, menyelesaikan rumah, reload pada state selesai, lalu pindah ke Level 2 dan 3. Tidak ada error console dan tidak ada scroll horizontal.
+Selain itu, game sudah diuji di Chrome headless dengan viewport ponsel 390×844 (sentuh): ngebut, Add, Gabung, upgrade, tambah mesin, tiga kali Jalan Baru, geser dan zoom kamera, kota selesai, reload tetap dalam keadaan selesai, lalu pindah ke Kota Bata. Tidak ada error console.
 
-## Keterbatasan yang masih ada
+## Keterbatasan
 
-- Belum diuji di ponsel fisik. Pengujian ponsel memakai emulasi viewport dan sentuh di Chrome, jadi performa di ponsel kelas bawah belum diukur. Jika berat, turunkan `shadow.mapSize` di `render/world.ts` atau batas DPR.
-- Audio disintesis dan kualitasnya subjektif. Ambience hanya kicau burung sesekali di hutan, tanpa musik latar.
-- Tidak ada progres offline. Ini disengaja: saat tab disembunyikan, simulasi dijeda.
-- Setelah Level 3, permainan mengulang tiga level yang sama dengan angka lebih besar, belum ada konten baru.
-- Merge selalu menaruh hasil di posisi kendaraan pertama. Tidak ada drag-and-drop (merge lewat tombol atau dua ketukan).
-- Tidak ada upgrade kecepatan kendaraan. Fitur ini opsional di brief dan sengaja tidak dibuat agar balance tetap sederhana.
+- Belum diuji di ponsel fisik; performa di ponsel kelas bawah belum diukur.
+- Jalan hanya bisa keluar dari keempat sisi pabrik (maksimal 4 jalan per kota). Belum ada cabang dari jalan lain maupun upgrade bangunan (rumah naik tingkat).
+- Saat seluruh kota sudah terbuka, kamera fokus ke pabrik + jalan yang sedang dibangun agar tetap terbaca di layar portrait. Bagian kota lain dilihat dengan geser/zoom atau tombol peta.
+- Audio disintesis dan kualitasnya subjektif. Tidak ada musik latar.
+- Tidak ada progres offline: simulasi dijeda saat tab disembunyikan.

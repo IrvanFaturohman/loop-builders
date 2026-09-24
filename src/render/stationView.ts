@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { MaterialKind, StationSlotDef } from '../game/types';
+import type { MaterialKind } from '../game/types';
 import { cbox, ccyl, mergeFlat, place } from './geom';
 import { ITEM_SIZE, itemGeometry } from './items';
 import { SHARED } from './palette';
@@ -41,6 +41,19 @@ function easeOutBack(t: number): number {
   const c1 = 1.7;
   const c3 = c1 + 1;
   return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+/** Posisi satu jalur mesin: mesin → conveyor → penyimpanan (dunia, x/z). */
+export interface MachineLineDef {
+  machine: [number, number];
+  storage: [number, number];
+}
+
+export interface StationViewOptions {
+  /** Penyimpanan dipakai bersama (digambar terpisah oleh depot): lewati palet & tumpukan. */
+  sharedStorage?: boolean;
+  /** Skala keseluruhan jalur mesin. */
+  scale?: number;
 }
 
 export interface StationVisualState {
@@ -85,28 +98,32 @@ export class StationView {
 
   constructor(
     readonly slot: number,
-    readonly def: StationSlotDef,
+    readonly def: MachineLineDef,
     readonly material: MaterialKind,
+    readonly opts: StationViewOptions = {},
   ) {
     const [mx, mz] = def.machine;
     const [sx, sz] = def.storage;
-    this.D = Math.hypot(sx - mx, sz - mz);
+    const scale = opts.scale ?? 1;
+    this.D = Math.hypot(sx - mx, sz - mz) / scale;
     this.group.position.set(mx, 0, mz);
     this.group.rotation.y = Math.atan2(-(sz - mz), sx - mx);
+    this.group.scale.setScalar(scale);
     const D = this.D;
 
     // Alas slot (selalu terlihat saat slot terbuka)
-    this.pad = new THREE.Mesh(cbox(D + 1.7, 0.06, 1.75, '#ece5d6', D / 2, 0.03, 0, 0.03), SHARED.vertexStd);
+    this.pad = new THREE.Mesh(opts.sharedStorage ? cbox(1.6, 0.06, 1.6, '#e3dccd', 0, 0.03, 0, 0.05) : cbox(D + 1.7, 0.06, 1.75, '#ece5d6', D / 2, 0.03, 0, 0.03), SHARED.vertexStd);
     this.pad.receiveShadow = true;
     this.group.add(this.pad);
 
     // Placeholder slot kosong: garis putus-putus + papan "+"
     const dashes: THREE.BufferGeometry[] = [];
-    const W = D + 1.5;
-    const H = 1.55;
-    for (let x = -W / 2; x < W / 2; x += 0.34) dashes.push(cbox(0.2, 0.03, 0.06, '#ffffff', D / 2 + x + 0.1, 0.075, H / 2, 0.01), cbox(0.2, 0.03, 0.06, '#ffffff', D / 2 + x + 0.1, 0.075, -H / 2, 0.01));
-    for (let z = -H / 2; z < H / 2; z += 0.34) dashes.push(cbox(0.06, 0.03, 0.2, '#ffffff', D / 2 - W / 2, 0.075, z + 0.1, 0.01), cbox(0.06, 0.03, 0.2, '#ffffff', D / 2 + W / 2, 0.075, z + 0.1, 0.01));
-    dashes.push(ccyl(0.05, 0.9, '#9a6a3c', 8, D / 2, 0.45, 0), cbox(0.62, 0.5, 0.08, '#ffffff', D / 2, 0.95, 0, 0.06), cbox(0.34, 0.08, 0.1, '#29b36a', D / 2, 0.95, 0, 0.02), cbox(0.08, 0.34, 0.1, '#29b36a', D / 2, 0.95, 0, 0.02));
+    const W = opts.sharedStorage ? 1.4 : D + 1.5;
+    const H = opts.sharedStorage ? 1.4 : 1.55;
+    const cx0 = opts.sharedStorage ? 0 : D / 2;
+    for (let x = -W / 2; x < W / 2; x += 0.34) dashes.push(cbox(0.2, 0.03, 0.06, '#ffffff', cx0 + x + 0.1, 0.075, H / 2, 0.01), cbox(0.2, 0.03, 0.06, '#ffffff', cx0 + x + 0.1, 0.075, -H / 2, 0.01));
+    for (let z = -H / 2; z < H / 2; z += 0.34) dashes.push(cbox(0.06, 0.03, 0.2, '#ffffff', cx0 - W / 2, 0.075, z + 0.1, 0.01), cbox(0.06, 0.03, 0.2, '#ffffff', cx0 + W / 2, 0.075, z + 0.1, 0.01));
+    dashes.push(ccyl(0.05, 0.9, '#9a6a3c', 8, cx0, 0.45, 0), cbox(0.62, 0.5, 0.08, '#ffffff', cx0, 0.95, 0, 0.06), cbox(0.34, 0.08, 0.1, '#29b36a', cx0, 0.95, 0, 0.02), cbox(0.08, 0.34, 0.1, '#29b36a', cx0, 0.95, 0, 0.02));
     const ph = new THREE.Mesh(mergeFlat(dashes), SHARED.vertexStd);
     ph.castShadow = true;
     this.placeholder.add(ph);
@@ -231,19 +248,19 @@ export class StationView {
     this.stack.count = 0;
     this.stack.frustumCulled = false;
     this.storageG.add(palletMesh, this.stack);
-    this.group.add(this.storageG);
+    if (!opts.sharedStorage) this.group.add(this.storageG);
 
     // Cincin seleksi
     this.selRing = new THREE.Mesh(new THREE.RingGeometry(1.05, 1.22, 40), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9 }));
     this.selRing.rotation.x = -Math.PI / 2;
-    this.selRing.position.set(D / 2, 0.08, 0);
-    this.selRing.scale.set((D + 1.6) / 2, 0.75, 1);
+    this.selRing.position.set(opts.sharedStorage ? 0 : D / 2, 0.08, 0);
+    this.selRing.scale.set(opts.sharedStorage ? 0.75 : (D + 1.6) / 2, 0.75, 1);
     this.selRing.visible = false;
     this.group.add(this.selRing);
 
     // Area sentuh (tak terlihat) — dibuat besar agar mudah diketuk di ponsel.
-    this.hit = new THREE.Mesh(new THREE.BoxGeometry(D + 1.9, 2.0, 1.9), SHARED.invisible);
-    this.hit.position.set(D / 2, 1, 0);
+    this.hit = new THREE.Mesh(new THREE.BoxGeometry(opts.sharedStorage ? 1.6 : D + 1.9, 2.0, opts.sharedStorage ? 1.6 : 1.9), SHARED.invisible);
+    this.hit.position.set(opts.sharedStorage ? 0 : D / 2, 1, 0);
     this.hit.userData = { type: 'station', slot };
     this.group.add(this.hit);
 
@@ -260,7 +277,7 @@ export class StationView {
     return this.group.localToWorld(out.set(this.D, 1.25, 0));
   }
   padCenter(out: THREE.Vector3): THREE.Vector3 {
-    return this.group.localToWorld(out.set(this.D / 2, 1.3, 0));
+    return this.group.localToWorld(out.set(this.opts.sharedStorage ? 0 : this.D / 2, 1.3, 0));
   }
   chimneyWorld(out: THREE.Vector3): THREE.Vector3 {
     return this.group.localToWorld(out.copy(this.chimneyTop));

@@ -1,11 +1,18 @@
-import type { TrackStageDef, Vec2 } from './types';
+import type { Vec2 } from './types';
+
+/** Bentuk lintasan: titik sudut poligon tertutup (searah jalan) + radius lengkung sudut. */
+export interface TrackShape {
+  /** Titik pertama harus berada di tengah ruas lurus (jarak 0 lintasan). */
+  corners: [number, number][];
+  radius: number;
+}
 
 /**
  * Lintasan loop tertutup satu arah, dibentuk dari poligon bersudut membulat
  * (ruas lurus + busur lingkaran). Panjangnya eksak sehingga "jarak tempuh" kendaraan
  * dan titik pickup/bongkar bisa dihitung tanpa ambiguitas.
  *
- * Jarak 0 = titik sudut pertama = titik bongkar.
+ * Jarak 0 = titik sudut pertama.
  */
 
 interface LineSeg {
@@ -40,7 +47,7 @@ export class TrackPath {
   private readonly samples: Vec2[] = [];
   private readonly sampleStep = 0.1;
 
-  constructor(readonly def: TrackStageDef) {
+  constructor(readonly def: TrackShape) {
     const pts = def.corners.map(([x, z]) => ({ x, z }));
     const n = pts.length;
     if (n < 3) throw new Error('Track butuh minimal 3 titik');
@@ -260,8 +267,8 @@ export function computeCrossings<T>(prev: number, move: number, length: number, 
 /**
  * Peta linear sepotong-sepotong dari jarak di lintasan lama → jarak di lintasan baru.
  * Bagian lintasan yang identik (awal & akhir loop) dipetakan 1:1, bagian yang berubah
- * dipetakan proporsional. Urutan relatif terhadap titik bongkar & stasiun lama tetap terjaga,
- * sehingga tidak ada pickup/bongkar yang terlewat atau terpicu dua kali karena expand.
+ * dipetakan proporsional. Urutan relatif terhadap titik pickup & kavling lama tetap terjaga,
+ * sehingga tidak ada pickup/pengiriman yang terlewat atau terpicu dua kali karena expand.
  */
 export class StageMapping {
   constructor(

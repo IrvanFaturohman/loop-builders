@@ -1,17 +1,19 @@
-import { LEVELS } from '../config/levels';
+import { CITIES } from '../config/cities';
 import { canAddVehicle, canExpand, isLastLevel } from '../game/actions';
-import { completedStageCount } from '../game/building';
 import {
   addCost,
-  buildCost,
+  buildingsDone,
   canUpgradeMore,
+  cityDef,
   expandCost,
   findMergePair,
-  isSlotUnlocked,
-  levelDef,
+  isPlotComplete,
+  isPlotUnlocked,
+  machineCost,
+  materialProgress,
   maxVehicles,
+  plotsOf,
   productionRate,
-  projectOf,
   storageCapacity,
   upgradeCost,
 } from '../game/economy';
@@ -23,8 +25,9 @@ export interface HudHandlers {
   add(): void;
   merge(): void;
   expand(): void;
-  stationAction(slot: number): void;
-  selectSlot(slot: number): void;
+  upgrade(): void;
+  machine(): void;
+  overview(): void;
   toggleSound(): void;
   openSettings(): void;
   closeSettings(): void;
@@ -34,12 +37,11 @@ export interface HudHandlers {
 }
 
 export interface HudContext {
-  selectedSlot: number;
   selectedVehicle: number | null;
   muted: boolean;
 }
 
-export type PulseTarget = 'add' | 'merge' | 'expand' | 'station' | null;
+export type PulseTarget = 'add' | 'merge' | 'expand' | 'upgrade' | 'machine' | null;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -56,9 +58,9 @@ export class Hud {
   private readonly hintEl = $('hint');
   private readonly boostEl = $('boost');
   private readonly boostFill = $('boost-fill');
-  private readonly stTabs = $('st-tabs');
   private readonly stInfo = $('st-info');
-  private readonly stAction = $<HTMLButtonElement>('st-action');
+  private readonly stUpgrade = $<HTMLButtonElement>('st-upgrade');
+  private readonly stMachine = $<HTMLButtonElement>('st-machine');
   private readonly stationBar = $('station-bar');
   private readonly btnAdd = $<HTMLButtonElement>('btn-add');
   private readonly btnMerge = $<HTMLButtonElement>('btn-merge');
@@ -80,7 +82,6 @@ export class Hud {
   private gainAcc = 0;
   private gainTimer = 0;
   private toastTimer = 0;
-  private tabsKey = '';
   private ticksKey = '';
   private pulseTarget: PulseTarget = null;
   private shownMoney = -1;
@@ -95,7 +96,9 @@ export class Hud {
     tap(this.btnAdd, () => h.add());
     tap(this.btnMerge, () => h.merge());
     tap(this.btnExpand, () => h.expand());
-    tap(this.stAction, () => h.stationAction(Number(this.stAction.dataset.slot ?? 0)));
+    tap(this.stUpgrade, () => h.upgrade());
+    tap(this.stMachine, () => h.machine());
+    tap($('btn-overview'), () => h.overview());
     tap(this.soundBtn, () => h.toggleSound());
     tap($('btn-settings'), () => h.openSettings());
     tap($('set-close'), () => h.closeSettings());
@@ -110,14 +113,7 @@ export class Hud {
     this.settingsEl.addEventListener('click', (e) => {
       if (e.target === this.settingsEl) h.closeSettings();
     });
-    this.stTabs.addEventListener('click', (e) => {
-      const t = (e.target as HTMLElement).closest<HTMLElement>('.st-tab');
-      if (t) {
-        e.stopPropagation();
-        h.selectSlot(Number(t.dataset.slot));
-      }
-    });
-    // Semua elemen HUD menelan pointerdown supaya tidak memicu boost di kanvas.
+    // Semua elemen HUD menelan pointerdown supaya tidak memicu boost/geser di kanvas.
     this.root.addEventListener('pointerdown', (e) => {
       if ((e.target as HTMLElement).closest('button, .project, .station-bar, .money, .c-card, .m-card, .modal')) e.stopPropagation();
     });
@@ -148,9 +144,9 @@ export class Hud {
   }
 
   update(state: GameState, rt: Runtime, ctx: HudContext, dt: number): void {
-    const level = levelDef(state);
-    const project = projectOf(state);
-    const look = MATERIAL_LOOK[level.material];
+    const city = cityDef(state);
+    const look = MATERIAL_LOOK[city.material];
+    const locked = state.completed;
 
     // Uang
     if (Math.floor(state.money) !== this.shownMoney) {
@@ -171,48 +167,61 @@ export class Hud {
       }
     }
 
-    // Proyek
-    this.set('pname', this.pName, `${project.name}`);
-    this.set('pcount', this.pCount, `<b>${fmtFull(state.delivered)}</b>/${fmtFull(project.target)} ${look.unit}`);
-    this.pFill.style.width = `${Math.min(100, (state.delivered / project.target) * 100).toFixed(1)}%`;
-    const ticksKey = project.id + project.target;
+    // Kartu kota
+    const b = buildingsDone(state);
+    const mat = materialProgress(state);
+    const plots = plotsOf(state.levelIndex);
+    this.set('pname', this.pName, city.name);
+    this.set('pcount', this.pCount, `<b>${b.done}</b>/${b.total} bangunan`);
+    this.pFill.style.width = `${Math.min(100, (mat.delivered / Math.max(1, mat.target)) * 100).toFixed(1)}%`;
+    const ticksKey = `${city.id}${state.cycle}`;
     if (ticksKey !== this.ticksKey) {
+      // Garis batas tiap jalan pada bar progres material.
       this.ticksKey = ticksKey;
-      this.pTicks.innerHTML = project.stageEnd
+      const total = plots.reduce((s, p) => s + p.def.target, 0) || 1;
+      let sum = 0;
+      const marks = city.streets.map((_, si) => {
+        for (const p of plots) if (p.street === si) sum += p.def.target;
+        return sum;
+      });
+      this.pTicks.innerHTML = marks
         .slice(0, -1)
-        .map((e) => `<span style="left:${((e / project.target) * 100).toFixed(2)}%"></span>`)
+        .map((m) => `<span style="left:${((m / total) * 100).toFixed(2)}%"></span>`)
         .join('');
     }
-    const done = completedStageCount(project, state.delivered);
-    const n = project.stageNames.length;
-    this.set(
-      'pstage',
-      this.pStage,
-      state.completed ? `<b>Selesai!</b> Semua ${n} tahap tuntas` : `Tahap ${done + 1}/${n} · <b>${project.stageNames[Math.min(done, n - 1)]}</b> · ${level.areaName}`,
-    );
+    let stageText: string;
+    if (state.completed) stageText = `<b>Kota selesai!</b> ${b.total} bangunan berdiri`;
+    else {
+      const active = city.streets.findIndex((_, si) => plots.some((p) => p.street === si && isPlotUnlocked(state, p.index) && !isPlotComplete(state, p.index)));
+      if (active >= 0) {
+        const sp = plots.filter((p) => p.street === active);
+        const done = sp.filter((p) => isPlotComplete(state, p.index)).length;
+        stageText = `<b>${city.streets[active].name}</b> · ${done}/${sp.length} jadi · ${fmtFull(mat.delivered)}/${fmtFull(mat.target)} ${look.unit}`;
+      } else stageText = '<b>Buka Jalan Baru</b> untuk kavling berikutnya';
+    }
+    this.set('pstage', this.pStage, stageText);
 
-    // Hint bottleneck (tidak memblokir, hanya teks kecil)
+    // Hint bottleneck (teks kecil, tidak memblokir)
     let hint = '';
     if (!state.completed && state.stats.levelTime > 20 && rt.freeze <= 0) {
-      const avgLoad = rt.recentLoads.length >= 4 ? rt.recentLoads.reduce((a, b) => a + b, 0) / rt.recentLoads.length : 1;
-      if (rt.storageFill > 0.8) hint = `${look.label} menumpuk — tambah atau gabung kendaraan`;
-      else if (avgLoad < 0.5 && rt.storageFill < 0.2) hint = 'Kendaraan sering kosong — tingkatkan produksi / bangun mesin';
+      const avgLoad = rt.recentLoads.length >= 6 ? rt.recentLoads.reduce((a, c) => a + c, 0) / rt.recentLoads.length : 1;
+      if (rt.storageFill > 0.8) hint = `${look.label} menumpuk di pabrik — tambah/gabung kendaraan`;
+      else if (avgLoad < 0.5 && rt.storageFill < 0.2) hint = 'Truk berangkat setengah kosong — upgrade pabrik / tambah mesin';
     }
     this.set('hint', this.hintEl, hint);
     this.hintEl.hidden = hint === '';
 
     // Boost
-    const b = rt.boost;
-    this.cls(this.boostEl, 'show', !state.completed && (b.energy < 0.995 || b.holding));
-    this.cls(this.boostEl, 'tired', b.exhausted);
-    this.boostFill.style.width = `${(b.energy * 100).toFixed(1)}%`;
+    const bs = rt.boost;
+    this.cls(this.boostEl, 'show', !state.completed && (bs.energy < 0.995 || bs.holding));
+    this.cls(this.boostEl, 'tired', bs.exhausted);
+    this.boostFill.style.width = `${(bs.energy * 100).toFixed(1)}%`;
 
     // Tombol utama
-    const locked = state.completed;
     const ac = addCost(state);
     const canAdd = canAddVehicle(state);
     const full = state.vehicles.length >= maxVehicles(state);
-    this.set('add', this.addCostEl, full ? 'Jalur penuh' : coin(ac));
+    this.set('add', this.addCostEl, full ? 'Jalan penuh' : coin(ac));
     this.cls(this.btnAdd, 'locked', locked || !canAdd.ok);
     this.afford(this.btnAdd, full ? 0 : state.money / ac, !canAdd.ok && !full);
 
@@ -236,70 +245,53 @@ export class Hud {
     this.cls(this.btnMerge, 'locked', locked || !mergeOk);
 
     const ec = expandCost(state);
-    this.set('expand', this.expandCostEl, ec === null ? 'Maksimum' : coin(ec));
+    this.set('expand', this.expandCostEl, ec === null ? 'Semua terbuka' : coin(ec));
     const canEx = canExpand(state);
     this.cls(this.btnExpand, 'locked', locked || !canEx.ok);
     this.afford(this.btnExpand, ec === null ? 0 : state.money / ec, ec !== null && !canEx.ok);
 
-    // Panel stasiun
-    const tabsKey = state.stations.map((s, i) => `${s.built ? 1 : 0}${isSlotUnlocked(state, i) ? 1 : 0}${ctx.selectedSlot === i ? 1 : 0}`).join('|');
-    if (tabsKey !== this.tabsKey) {
-      this.tabsKey = tabsKey;
-      this.stTabs.innerHTML = state.stations
-        .map((s, i) => {
-          const unlocked = isSlotUnlocked(state, i);
-          const c = ['st-tab', ctx.selectedSlot === i ? 'active' : '', !unlocked ? 'locked' : '', unlocked && !s.built ? 'empty' : ''].join(' ');
-          return `<button type="button" class="${c}" data-slot="${i}" aria-label="Mesin ${i + 1}">${!unlocked ? '🔒' : !s.built ? '+' : i + 1}</button>`;
-        })
-        .join('');
-    }
-    const slot = Math.min(ctx.selectedSlot, state.stations.length - 1);
-    const st = state.stations[slot];
-    const slotDef = level.slots[slot];
-    const unlocked = isSlotUnlocked(state, slot);
-    this.stAction.dataset.slot = String(slot);
-    let info: string;
-    let action: string;
-    let actionState: 'ok' | 'locked' | 'max' = 'ok';
-    if (!unlocked) {
-      info = `<div class="st-name">Slot ${slot + 1} terkunci</div><div class="st-meta">Perluas jalur untuk membuka slot</div>`;
-      action = ec === null ? 'Terkunci' : `Perluas Jalur<small>${coin(ec)}</small>`;
-      actionState = canEx.ok ? 'ok' : 'locked';
-    } else if (!st.built) {
-      const bc = buildCost(state, slot);
-      info = `<div class="st-name">Slot ${slot + 1} kosong</div><div class="st-meta">Mesin baru + conveyor + penyimpanan</div>`;
-      action = `Bangun Mesin<small>${coin(bc)}</small>`;
-      actionState = state.money >= bc && !locked ? 'ok' : 'locked';
+    // Panel pabrik
+    const cap = storageCapacity(state);
+    const isFull = state.depot.storage >= cap;
+    this.set(
+      'stinfo',
+      this.stInfo,
+      `<div class="st-name">Pabrik ${look.label}</div><div class="st-meta${isFull ? ' full' : ''}">Lv${state.depot.level} · ${state.depot.machines} mesin · ${fmtRate(productionRate(state))}/dtk</div>`,
+    );
+    if (!canUpgradeMore(state)) {
+      this.set('stup', this.stUpgrade, 'Produksi Maks');
+      this.cls(this.stUpgrade, 'max', true);
+      this.cls(this.stUpgrade, 'locked', false);
     } else {
-      const cap = storageCapacity(st);
-      const isFull = st.storage + st.conveyor.length >= cap && st.storage >= cap;
-      info = `<div class="st-name">${slotDef.name} · Lv${st.level}</div><div class="st-meta${isFull ? ' full' : ''}">${fmtRate(productionRate(state, st))}/dtk · Stok ${st.storage}/${cap}${isFull ? ' · Penuh!' : ''}</div>`;
-      if (!canUpgradeMore(st)) {
-        action = 'Produksi Maks';
-        actionState = 'max';
-      } else {
-        const uc = upgradeCost(state, st);
-        action = `Produksi Lv. ${st.level + 1}<small>${coin(uc)}</small>`;
-        actionState = state.money >= uc && !locked ? 'ok' : 'locked';
-      }
+      const uc = upgradeCost(state);
+      this.set('stup', this.stUpgrade, `Produksi Lv.${state.depot.level + 1}<small>${coin(uc)}</small>`);
+      this.cls(this.stUpgrade, 'max', false);
+      this.cls(this.stUpgrade, 'locked', locked || state.money < uc);
     }
-    this.set('stinfo', this.stInfo, info);
-    this.set('staction', this.stAction, action);
-    this.cls(this.stAction, 'locked', actionState === 'locked');
-    this.cls(this.stAction, 'max', actionState === 'max');
+    const mc = machineCost(state);
+    if (mc === null) {
+      this.set('stmc', this.stMachine, 'Mesin Maks');
+      this.cls(this.stMachine, 'max', true);
+      this.cls(this.stMachine, 'locked', false);
+    } else {
+      this.set('stmc', this.stMachine, `+ Mesin<small>${coin(mc)}</small>`);
+      this.cls(this.stMachine, 'max', false);
+      this.cls(this.stMachine, 'locked', locked || state.money < mc);
+    }
 
     // Pulse tutorial
-    const targets: Record<Exclude<PulseTarget, null>, HTMLElement> = { add: this.btnAdd, merge: this.btnMerge, expand: this.btnExpand, station: this.stAction };
-    for (const [k, el] of Object.entries(targets)) this.cls(el, 'pulse', this.pulseTarget === k);
+    for (const [k, el] of Object.entries(this.targets())) this.cls(el, 'pulse', this.pulseTarget === k);
 
-    // Toast
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toastEl.classList.remove('show');
     }
-
     this.cls(this.soundBtn, 'muted', ctx.muted);
     this.soundSwitch.setAttribute('aria-checked', String(!ctx.muted));
+  }
+
+  private targets(): Record<Exclude<PulseTarget, null>, HTMLElement> {
+    return { add: this.btnAdd, merge: this.btnMerge, expand: this.btnExpand, upgrade: this.stUpgrade, machine: this.stMachine };
   }
 
   private afford(btn: HTMLElement, ratio: number, show: boolean): void {
@@ -333,21 +325,21 @@ export class Hud {
     this.cls(this.tutorial, 'no-arrow', !arrow);
   }
 
-  /** Posisi atas-tengah sebuah tombol HUD (untuk menempatkan tutorial). */
+  /** Posisi atas-tengah tombol HUD (tutorial ditaruh di atas panel bawah). */
   anchorOf(t: Exclude<PulseTarget, null>): { x: number; y: number } {
-    const el = { add: this.btnAdd, merge: this.btnMerge, expand: this.btnExpand, station: this.stAction }[t];
+    const el = this.targets()[t];
     const r = el.getBoundingClientRect();
     const app = this.root.getBoundingClientRect();
-    // Gelembung ditaruh di atas seluruh panel bawah supaya tidak menutupi info stasiun.
     const bar = this.stationBar.getBoundingClientRect();
-    const top = bar.width < app.width * 0.9 && bar.left > app.left + app.width * 0.4 ? r.top : Math.min(r.top, bar.top);
+    const side = bar.width < app.width * 0.9 && bar.left > app.left + app.width * 0.4;
+    const top = side || t === 'upgrade' || t === 'machine' ? r.top : Math.min(r.top, bar.top);
     return { x: r.left - app.left + r.width / 2, y: top - app.top - 10 };
   }
 
   moneyGain(amount: number): void {
     if (amount <= 0) return;
     this.gainAcc += amount;
-    if (this.gainTimer <= 0) this.gainTimer = 0.18;
+    if (this.gainTimer <= 0) this.gainTimer = 0.25;
   }
 
   toast(msg: string, seconds = 1.6): void {
@@ -356,8 +348,8 @@ export class Hud {
     this.toastTimer = seconds;
   }
 
-  bought(which: 'add' | 'merge' | 'expand' | 'station'): void {
-    const el = { add: this.btnAdd, merge: this.btnMerge, expand: this.btnExpand, station: this.stAction }[which];
+  bought(which: Exclude<PulseTarget, null>): void {
+    const el = this.targets()[which];
     el.classList.remove('bought');
     void el.offsetWidth;
     el.classList.add('bought');
@@ -370,19 +362,14 @@ export class Hud {
   }
 
   showComplete(state: GameState): void {
-    const project = projectOf(state);
-    const look = MATERIAL_LOOK[project.material];
-    $('c-title').textContent = `${project.name} selesai!`;
-    const items = [
-      `${fmtFull(project.target)} ${look.unit} terpasang`,
-      `Waktu ${fmtTime(state.stats.levelTime)}`,
-      `Bonus ${coin(state.stats.lastCompletionBonus)}`,
-    ];
+    const city = cityDef(state);
+    const b = buildingsDone(state);
+    $('c-title').textContent = `${city.name} selesai!`;
+    const items = [`${b.total} bangunan berdiri`, `Waktu ${fmtTime(state.stats.levelTime)}`, `Bonus ${coin(state.stats.lastCompletionBonus)}`];
     if (state.stats.lastLeftoverMoney > 0) items.push(`Sisa material dijual ${coin(state.stats.lastLeftoverMoney)}`);
     $('c-stats').innerHTML = items.map((t) => `<li>${t}</li>`).join('');
-    const nextIdx = (state.levelIndex + 1) % LEVELS.length;
-    const nextLevel = LEVELS[nextIdx];
-    $('btn-next').innerHTML = isLastLevel(state) ? `Proyek Berikutnya<br><small style="font-size:12px;opacity:.9">Putaran baru · ${nextLevel.areaName}</small>` : `Proyek Berikutnya<br><small style="font-size:12px;opacity:.9">${nextLevel.areaName}</small>`;
+    const next = CITIES[(state.levelIndex + 1) % CITIES.length];
+    $('btn-next').innerHTML = `Kota Berikutnya<br><small style="font-size:12px;opacity:.9">${isLastLevel(state) ? 'Putaran baru · ' : ''}${next.name}</small>`;
     this.completeEl.hidden = false;
     $('bottom').style.visibility = 'hidden';
   }

@@ -1,16 +1,7 @@
 import { Sfx } from './audio/sfx';
 import { BALANCE } from './config/balance';
-import {
-  addVehicle,
-  buildStation,
-  expandTrack,
-  mergeAuto,
-  mergeVehicles,
-  nextProject,
-  upgradeStation,
-  type ActionResult,
-} from './game/actions';
-import { isSlotUnlocked, levelDef, projectOf, trackOf } from './game/economy';
+import { addMachine, addVehicle, expandTrack, mergeAuto, mergeVehicles, nextProject, upgradeDepot, type ActionResult } from './game/actions';
+import { cityDef, trackOf } from './game/economy';
 import type { GameEvent } from './game/events';
 import { clearSave, loadGame, loadSettings, saveGame, saveSettings, type Settings } from './game/save';
 import { boostHold, boostTap, step } from './game/sim';
@@ -20,9 +11,20 @@ import { World } from './render/world';
 import { Hud } from './ui/hud';
 import { currentTutorial, updateTutorialFlags } from './ui/tutorial';
 
+interface Touch {
+  x: number;
+  y: number;
+  sx: number;
+  sy: number;
+  boost: boolean;
+  panning: boolean;
+  consumed: boolean;
+}
+
 /**
  * Kontroler utama: menghubungkan simulasi (state murni) ↔ render Three.js ↔ HUD DOM ↔ audio.
  * Loop: dt dibatasi → sub-step simulasi → event → efek/audio/HUD → render.
+ * Input: ketuk/tahan = ngebut, seret = geser kamera, cubit/scroll = zoom.
  */
 export class App {
   private state: GameState;
@@ -31,7 +33,6 @@ export class App {
   private readonly hud: Hud;
   private readonly sfx = new Sfx();
   private settings: Settings;
-  private selectedSlot = 0;
   private selectedVehicle: number | null = null;
   private readonly events: GameEvent[] = [];
   private last = 0;
@@ -40,7 +41,8 @@ export class App {
   private saveDebounce = -1;
   private completeTimer = -1;
   private transitioning = false;
-  private readonly boostPointers = new Set<number>();
+  private readonly touches = new Map<number, Touch>();
+  private pinchDist = 0;
   private readonly canvas: HTMLCanvasElement;
   private readonly appEl: HTMLElement;
   private storage: Storage;
@@ -55,19 +57,19 @@ export class App {
     this.state = loaded.state ?? createNewGame();
 
     this.world = new World(this.canvas, document.getElementById('labels')!, {
-      onBuildClick: (slot) => {
-        this.selectSlot(slot, false);
-        this.stationAction(slot);
-      },
       onModulePop: (i) => this.sfx.modulePop(i),
       onItemLand: (kind, big) => this.sfx.land(kind, big),
     });
     this.hud = new Hud({
-      add: () => this.doAdd(),
+      add: () => this.act(addVehicle(this.state, this.events)),
       merge: () => this.doMerge(),
       expand: () => this.doExpand(),
-      stationAction: (slot) => this.stationAction(slot),
-      selectSlot: (slot) => this.selectSlot(slot, false),
+      upgrade: () => this.act(upgradeDepot(this.state, this.events)),
+      machine: () => this.act(addMachine(this.state, this.events)),
+      overview: () => {
+        this.sfx.click();
+        this.world.overview(this.state);
+      },
       toggleSound: () => this.setSound(this.settings.muted),
       openSettings: () => {
         this.releaseBoost();
@@ -87,7 +89,7 @@ export class App {
     this.onResize();
     new ResizeObserver(() => this.onResize()).observe(this.appEl);
 
-    if (loaded.corrupted) this.hud.toast('Save rusak — memulai permainan baru', 2.5);
+    if (loaded.corrupted) this.hud.toast('Save lama/rusak — memulai kota baru', 2.5);
     if (this.state.completed) this.hud.showComplete(this.state);
     else this.showTitle();
     requestAnimationFrame((t) => this.frame(t));
@@ -105,7 +107,7 @@ export class App {
       dt = 0;
       this.resetClock = false;
     }
-    // dt dibatasi: tab yang ditinggal tidak membuat kendaraan "melompat" melewati stasiun.
+    // dt dibatasi: tab yang ditinggal tidak membuat kendaraan "melompat".
     dt = Math.max(0, Math.min(BALANCE.maxFrameDt, dt));
 
     if (!document.hidden && !this.transitioning && !this.hud.settingsOpen) {
@@ -119,11 +121,9 @@ export class App {
     this.processEvents();
     if (updateTutorialFlags(this.state, this.rt)) this.requestSave(0.5);
 
-    const ctx = { selectedSlot: this.selectedSlot, selectedVehicle: this.selectedVehicle, muted: this.settings.muted };
-    this.world.selectedSlot = this.selectedSlot;
     this.world.selectedVehicle = this.selectedVehicle;
     this.world.update(dt, this.state, this.rt);
-    this.hud.update(this.state, this.rt, ctx, dt);
+    this.hud.update(this.state, this.rt, { selectedVehicle: this.selectedVehicle, muted: this.settings.muted }, dt);
     this.updateTutorial();
     this.sfx.setEngine(this.rt.boost.mult, !this.state.completed && this.rt.freeze <= 0 && !document.hidden);
     this.sfx.tick(dt);
@@ -144,7 +144,7 @@ export class App {
   private processEvents(): void {
     if (!this.events.length) return;
     this.world.handleEvents(this.events, this.state);
-    const mat = levelDef(this.state).material;
+    const mat = cityDef(this.state).material;
     for (const e of this.events) {
       switch (e.type) {
         case 'produced':
@@ -156,22 +156,29 @@ export class App {
         case 'pickup':
           this.sfx.pickup(e.amount);
           break;
-        case 'unload':
+        case 'deliver':
           this.sfx.unload(e.amount, mat);
           this.hud.moneyGain(e.money);
           this.requestSave(1.5);
           break;
-        case 'stageComplete':
+        case 'rent':
+          this.sfx.rent();
+          this.hud.moneyGain(e.amount);
+          break;
+        case 'plotComplete':
           this.sfx.stageComplete();
+          this.requestSave(0.3);
+          break;
+        case 'streetComplete':
+          this.sfx.merge(4);
           this.hud.moneyGain(e.bonus);
-          this.requestSave(0.2);
           break;
         case 'projectComplete':
           this.sfx.projectComplete();
           this.hud.moneyGain(e.bonus + e.leftover);
           this.selectedVehicle = null;
           this.releaseBoost();
-          this.completeTimer = 1.9;
+          this.completeTimer = 2.2;
           this.saveNow();
           break;
         case 'add':
@@ -186,16 +193,15 @@ export class App {
         case 'expand':
           this.sfx.expand();
           this.hud.bought('expand');
-          this.selectSlot(levelDef(this.state).slots.findIndex((s) => s.unlockStage === e.to), false);
           break;
-        case 'build':
+        case 'machine':
           this.sfx.build();
-          this.hud.bought('station');
+          this.hud.bought('machine');
           break;
         case 'upgrade':
           this.sfx.upgrade();
           this.sfx.purchase();
-          this.hud.bought('station');
+          this.hud.bought('upgrade');
           break;
         default:
           break;
@@ -219,10 +225,6 @@ export class App {
     return true;
   }
 
-  private doAdd(): void {
-    this.act(addVehicle(this.state, this.events));
-  }
-
   private doMerge(): void {
     if (this.selectedVehicle !== null) {
       const sel = this.state.vehicles.find((v) => v.id === this.selectedVehicle);
@@ -242,24 +244,9 @@ export class App {
   }
 
   private doExpand(): void {
-    // Satu animasi expand sekaligus: tunggu morph lintasan sebelumnya selesai.
+    // Satu animasi jalan baru sekaligus: tunggu jalan sebelumnya selesai tumbuh.
     if (this.rt.freeze > 0) return;
     this.act(expandTrack(this.state, this.rt, this.events));
-  }
-
-  private stationAction(slot: number): void {
-    const st = this.state.stations[slot];
-    if (!st) return;
-    if (!isSlotUnlocked(this.state, slot)) this.doExpand();
-    else if (!st.built) this.act(buildStation(this.state, slot, this.events));
-    else this.act(upgradeStation(this.state, slot, this.events));
-  }
-
-  private selectSlot(slot: number, fromWorld: boolean): void {
-    if (slot < 0 || slot >= this.state.stations.length) return;
-    this.selectedSlot = slot;
-    this.sfx.click();
-    if (fromWorld) this.hud.flashStationBar();
   }
 
   private onVehicleTap(id: number): void {
@@ -269,7 +256,7 @@ export class App {
       this.selectedVehicle = id;
       this.sfx.select();
       const partners = this.state.vehicles.filter((x) => x.id !== id && x.level === v.level).length;
-      this.hud.toast(partners > 0 ? `Lv${v.level} dipilih — ketuk kendaraan Lv${v.level} lain` : `Lv${v.level} dipilih — belum ada pasangan setingkat`, 1.8);
+      this.hud.toast(partners > 0 ? `Lv${v.level} dipilih — ketuk truk Lv${v.level} lain` : `Lv${v.level} dipilih — belum ada pasangan setingkat`, 1.8);
       return;
     }
     if (this.selectedVehicle === id) {
@@ -296,7 +283,6 @@ export class App {
       nextProject(this.state, this.events);
       this.events.length = 0;
       this.rt = createRuntime();
-      this.selectedSlot = 0;
       this.selectedVehicle = null;
       this.completeTimer = -1;
       this.world.loadLevel(this.state);
@@ -315,7 +301,6 @@ export class App {
     clearSave(this.storage);
     this.state = createNewGame();
     this.rt = createRuntime();
-    this.selectedSlot = 0;
     this.selectedVehicle = null;
     this.completeTimer = -1;
     this.events.length = 0;
@@ -339,13 +324,12 @@ export class App {
   }
 
   private showTitle(): void {
-    const level = levelDef(this.state);
-    const project = projectOf(this.state);
-    this.hud.showTitle(`Proyek ${this.state.levelIndex + 1 + this.state.cycle * 3} · ${level.areaName}`, project.name);
+    const city = cityDef(this.state);
+    this.hud.showTitle(`Kota ${this.state.levelIndex + 1 + this.state.cycle * 2}`, city.name);
   }
 
   private applyAmbience(): void {
-    this.sfx.ambience = levelDef(this.state).theme === 'city' ? 'none' : 'birds';
+    this.sfx.ambience = cityDef(this.state).theme === 'city' ? 'none' : 'birds';
   }
 
   // ---------------------------------------------------------------------------
@@ -368,11 +352,6 @@ export class App {
       this.hud.setPulse(null);
       const m = this.margins;
       this.hud.showTutorial(s.text, (this.appEl.clientWidth - m.right) / 2, this.appEl.clientHeight - m.bottom - 8, false);
-    } else if (s.target === 'slot') {
-      this.hud.setPulse(null);
-      const p = this.world.buildButtonAnchor(s.slot ?? 0);
-      if (p) this.hud.showTutorial(s.text, p.x, p.y);
-      else this.hud.showTutorial(null);
     } else {
       this.hud.setPulse(s.target);
       const a = this.hud.anchorOf(s.target);
@@ -394,32 +373,85 @@ export class App {
     c.addEventListener('pointerdown', (e) => {
       if (this.transitioning || this.hud.settingsOpen) return;
       e.preventDefault();
-      const pick = this.world.pick(e.clientX, e.clientY, c.getBoundingClientRect());
-      if (pick && !this.state.completed) {
-        if (pick.type === 'vehicle') this.onVehicleTap(pick.id);
-        else this.selectSlot(pick.slot, true);
-        return;
-      }
-      // Tap di area dunia (bukan UI/objek) → boost; tahan → boost dipertahankan.
-      if (this.selectedVehicle !== null) this.selectedVehicle = null;
-      if (this.state.completed) return;
-      this.boostPointers.add(e.pointerId);
       try {
         c.setPointerCapture(e.pointerId);
       } catch {
         /* abaikan */
       }
+      const t: Touch = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, boost: false, panning: false, consumed: false };
+      this.touches.set(e.pointerId, t);
+      if (this.touches.size >= 2) {
+        // Dua jari: cubit untuk zoom, hentikan boost & geser.
+        this.releaseBoost();
+        for (const o of this.touches.values()) o.consumed = true;
+        this.pinchDist = this.pinchDistance();
+        return;
+      }
+      const pick = this.world.pick(e.clientX, e.clientY, c.getBoundingClientRect());
+      if (pick && !this.state.completed) {
+        t.consumed = true;
+        if (pick.type === 'vehicle') this.onVehicleTap(pick.id);
+        else {
+          this.sfx.click();
+          this.hud.flashStationBar();
+        }
+        return;
+      }
+      if (this.selectedVehicle !== null) this.selectedVehicle = null;
+      if (this.state.completed) return;
+      // Tap di area dunia → boost; tahan → dipertahankan; seret → berubah jadi geser kamera.
+      t.boost = true;
       boostHold(this.rt, true);
       if (!this.rt.boost.exhausted) this.sfx.boostStart();
     });
+
+    c.addEventListener('pointermove', (e) => {
+      const t = this.touches.get(e.pointerId);
+      if (!t) return;
+      if (this.touches.size >= 2) {
+        t.x = e.clientX;
+        t.y = e.clientY;
+        const d = this.pinchDistance();
+        if (this.pinchDist > 0 && d > 0) this.world.zoom(this.pinchDist / d);
+        this.pinchDist = d;
+        return;
+      }
+      if (t.consumed) return;
+      const dx = e.clientX - t.x;
+      const dy = e.clientY - t.y;
+      if (!t.panning && Math.hypot(e.clientX - t.sx, e.clientY - t.sy) > 12) {
+        t.panning = true;
+        if (t.boost) {
+          t.boost = false;
+          this.rt.boost.tapTimer = 0;
+          if (![...this.touches.values()].some((o) => o.boost)) boostHold(this.rt, false);
+        }
+      }
+      if (t.panning) this.world.pan(dx, dy, c.getBoundingClientRect());
+      t.x = e.clientX;
+      t.y = e.clientY;
+    });
+
     const release = (e: PointerEvent) => {
-      if (this.boostPointers.delete(e.pointerId) && this.boostPointers.size === 0) boostHold(this.rt, false);
+      const t = this.touches.get(e.pointerId);
+      if (!t) return;
+      this.touches.delete(e.pointerId);
+      if (t.boost && ![...this.touches.values()].some((o) => o.boost)) boostHold(this.rt, false);
+      if (this.touches.size < 2) this.pinchDist = 0;
     };
     c.addEventListener('pointerup', release);
     c.addEventListener('pointercancel', release);
     c.addEventListener('lostpointercapture', release);
     c.addEventListener('contextmenu', (e) => e.preventDefault());
-    // Cegah zoom/scroll tak sengaja (iOS gesture & double-tap).
+    c.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        this.world.zoom(Math.exp(Math.max(-60, Math.min(60, e.deltaY)) * 0.004));
+      },
+      { passive: false },
+    );
+    // Cegah zoom/scroll browser tak sengaja (iOS gesture & double-tap).
     document.addEventListener('gesturestart', (e) => e.preventDefault());
     document.addEventListener('dblclick', (e) => e.preventDefault());
     document.addEventListener(
@@ -442,7 +474,7 @@ export class App {
           boostHold(this.rt, true);
           break;
         case 'a':
-          this.doAdd();
+          this.act(addVehicle(this.state, this.events));
           break;
         case 'm':
           this.doMerge();
@@ -451,12 +483,13 @@ export class App {
           this.doExpand();
           break;
         case 'u':
-          this.stationAction(this.selectedSlot);
+          this.act(upgradeDepot(this.state, this.events));
           break;
-        case '1':
-        case '2':
-        case '3':
-          this.selectSlot(Number(e.key) - 1, false);
+        case 'n':
+          this.act(addMachine(this.state, this.events));
+          break;
+        case 'o':
+          this.world.overview(this.state);
           break;
         case 'enter':
           if (this.state.completed && this.hud.completeVisible) this.next();
@@ -476,8 +509,14 @@ export class App {
     });
   }
 
+  private pinchDistance(): number {
+    const pts = [...this.touches.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
   private releaseBoost(): void {
-    this.boostPointers.clear();
+    for (const t of this.touches.values()) t.boost = false;
     boostHold(this.rt, false);
   }
 
@@ -485,6 +524,7 @@ export class App {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         this.releaseBoost();
+        this.touches.clear();
         this.saveNow();
         this.sfx.suspend();
       } else {

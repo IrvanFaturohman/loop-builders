@@ -1,16 +1,18 @@
 /**
  * Angka balancing global. Ubah di sini untuk menyetel rasa permainan;
- * angka per-level (biaya expand, target, dll.) ada di levels.ts dan projects/.
+ * angka per kota (target bangunan, sewa, biaya jalan/mesin) ada di cities.ts.
  */
 export const BALANCE = {
   /** Kapasitas per tingkat kendaraan (Lv1..Lv6). 2×cap(n) <= cap(n+1) supaya merge tidak overflow. */
   vehicleCapacity: [4, 10, 24, 55, 120, 260],
   /** Kecepatan dasar kendaraan (unit dunia per detik). */
-  vehicleSpeed: 4.3,
+  vehicleSpeed: 5.0,
   /** Jarak minimum antar kendaraan (visual) sebelum yang di belakang mengerem. */
   minVehicleGap: 1.25,
   /** Kekuatan penyeimbang jarak antar kendaraan (0 = mati). */
   spacingGain: 0.14,
+  /** Panjang lintasan per kendaraan maksimum (batas jumlah kendaraan). */
+  lengthPerVehicle: 3.4,
 
   boost: {
     /** Pengali kecepatan saat boost (+70%). */
@@ -29,19 +31,20 @@ export const BALANCE = {
     decel: 3.2,
   },
 
-  add: { base: 10, growth: 1.5 },
-  upgrade: { base: 16, growth: 1.72, maxLevel: 10 },
-  /** Setiap Produksi Lv. menambah throughput sebesar faktor ini (+50%). */
-  productionGrowth: 1.5,
-  storage: { base: 12, perLevel: 4 },
+  add: { base: 10, growth: 1.45 },
+  /** Upgrade produksi depot (berlaku ke semua mesin). */
+  upgrade: { base: 16, growth: 1.7, maxLevel: 12 },
+  /** Setiap Produksi Lv. menambah throughput tiap mesin sebesar faktor ini (+40%). */
+  productionGrowth: 1.4,
+  /** Kapasitas penyimpanan depot: dasar + per level + per mesin tambahan. */
+  storage: { base: 12, perLevel: 4, perMachine: 6 },
+  maxMachines: 4,
   /** Waktu item menempuh conveyor (detik). */
-  conveyorTime: 1.15,
-  /** Biaya upgrade slot 2/3 sedikit lebih mahal. */
-  slotUpgradeFactor: [1, 1.25, 1.5],
+  conveyorTime: 0.9,
 
-  /** Pengali biaya & target tiap putaran ulang daftar level. */
+  /** Pengali biaya, target & sewa tiap putaran ulang daftar kota. */
   cycleScale: 0.6,
-  /** Durasi pembekuan kendaraan selama animasi expand (detik). */
+  /** Durasi pembekuan kendaraan selama animasi jalan baru (detik). */
   expandFreeze: 1.35,
   /** Batas dt per frame & per sub-step simulasi. */
   maxFrameDt: 0.1,

@@ -11,7 +11,6 @@ const rect = (top: number, bottom: number, hw: number, r: number) =>
       [-hw, top],
     ],
     radius: r,
-    maxVehicles: 6,
   });
 
 describe('TrackPath', () => {

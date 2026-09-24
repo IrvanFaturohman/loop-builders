@@ -184,6 +184,20 @@ export class Sfx {
     }
   }
 
+  private rentCombo = 0;
+  private rentLast = 0;
+
+  /** Koin sewa: nada naik bertahap saat banyak bangunan membayar beruntun (terasa "reward line"). */
+  rent(): void {
+    const now = performance.now();
+    this.rentCombo = now - this.rentLast < 380 ? Math.min(12, this.rentCombo + 1) : 0;
+    this.rentLast = now;
+    if (!this.ok('rent', 45, 1)) return;
+    const f = 1318.51 * Math.pow(2, (this.rentCombo % 13) / 12);
+    this.tone(f, 0.07, 'triangle', 0.035);
+    this.tone(f * 1.5, 0.05, 'sine', 0.018, { delay: 0.03 });
+  }
+
   modulePop(i: number): void {
     if (!this.ok('pop', 45, 1)) return;
     this.tone(this.vary(PENTA[i % PENTA.length], 0.015), 0.1, 'sine', 0.05, { slide: PENTA[i % PENTA.length] * 1.25 });

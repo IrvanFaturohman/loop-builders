@@ -12,6 +12,10 @@ export class ProjectBuilder {
   mod(stage: number, weight: number, ...prims: (Prim | Prim[])[]): void {
     this.modules.push({ stage, weight, prims: prims.flat() });
   }
+
+  done(): ModuleDef[] {
+    return this.modules;
+  }
 }
 
 export function box(p: V3, s: V3, c: string, round = 0.03, r?: V3): Prim {
@@ -34,8 +38,8 @@ export function sphere(p: V3, radius: number, c: string): Prim {
   return { kind: 'sphere', p, radius, c };
 }
 
-export function cone(p: V3, radius: number, h: number, c: string, seg = 8): Prim {
-  return { kind: 'cone', p, radius, h, c, seg };
+export function cone(p: V3, radius: number, h: number, c: string, seg = 8, r?: V3): Prim {
+  return { kind: 'cone', p, radius, h, c, seg, r };
 }
 
 /**

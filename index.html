@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#8fd16a" />
-    <meta name="description" content="Loop Builders — game idle/clicker 3D: kendaraan berputar mengangkut material untuk membangun rumah." />
+    <meta name="description" content="Loop Builders — game idle/clicker 3D: bangun kota bercabang, truk mengangkut material dari pabrik ke rumah-rumah." />
     <title>Loop Builders</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='6' y='26' width='52' height='32' rx='6' fill='%23c98b4f'/%3E%3Cpath d='M2 30 32 6l30 24z' fill='%23e05a42'/%3E%3Crect x='26' y='38' width='12' height='20' rx='2' fill='%233e8f7c'/%3E%3C/svg%3E" />
   </head>
@@ -22,6 +22,9 @@
                 <span class="gain" id="money-gain"></span>
               </div>
               <div class="top-actions">
+                <button class="icon-btn" id="btn-overview" type="button" aria-label="Lihat seluruh kota">
+                  <svg viewBox="0 0 24 24"><path d="M3 6.5 9 4l6 2.5L21 4v13.5L15 20l-6-2.5L3 20z" fill="none" stroke-width="2" stroke-linejoin="round" /><path d="M9 4v13.5M15 6.5V20" fill="none" stroke-width="2" /></svg>
+                </button>
                 <button class="icon-btn" id="btn-sound" type="button" aria-label="Suara">
                   <svg viewBox="0 0 24 24" class="ico-on"><path d="M4 9v6h4l5 4V5L8 9H4z" /><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke-width="2" stroke-linecap="round" /></svg>
                   <svg viewBox="0 0 24 24" class="ico-off"><path d="M4 9v6h4l5 4V5L8 9H4z" /><path d="M16.5 9.5l5 5M21.5 9.5l-5 5" fill="none" stroke-width="2" stroke-linecap="round" /></svg>
@@ -48,9 +51,9 @@
 
           <footer class="bottom" id="bottom">
             <div class="station-bar" id="station-bar">
-              <div class="st-tabs" id="st-tabs"></div>
               <div class="st-info" id="st-info"></div>
-              <button class="st-action" id="st-action" type="button"></button>
+              <button class="st-action" id="st-upgrade" type="button"></button>
+              <button class="st-action alt" id="st-machine" type="button"></button>
             </div>
             <div class="main-buttons">
               <button class="big-btn add" id="btn-add" type="button">
@@ -65,7 +68,7 @@
               </button>
               <button class="big-btn expand" id="btn-expand" type="button">
                 <span class="bb-icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="6" fill="none" stroke-width="3" /><path d="M12 1v6M12 17v6M1 12h6M17 12h6" fill="none" stroke-width="2.4" stroke-linecap="round" /></svg></span>
-                <span class="bb-label">Perluas Jalur</span>
+                <span class="bb-label">Jalan Baru</span>
                 <span class="bb-cost" id="expand-cost"></span>
               </button>
             </div>
@@ -79,7 +82,7 @@
               <div class="c-badge">Selesai!</div>
               <h2 id="c-title">Proyek selesai</h2>
               <ul class="c-stats" id="c-stats"></ul>
-              <button class="next-btn" id="btn-next" type="button">Proyek Berikutnya</button>
+              <button class="next-btn" id="btn-next" type="button">Kota Berikutnya</button>
             </div>
           </section>
 
@@ -101,7 +104,7 @@
                   <button class="danger" id="reset-yes" type="button">Ya, hapus</button>
                 </div>
               </div>
-              <p class="m-help">Ketuk/tahan area dunia untuk ngebut. Ketuk kendaraan lalu kendaraan setingkat lain untuk menggabung. Ketuk mesin untuk upgrade.</p>
+              <p class="m-help">Ketuk/tahan untuk ngebut. Geser layar untuk melihat-lihat kota, cubit/scroll untuk zoom, tombol peta untuk melihat seluruh kota. Ketuk kendaraan lalu kendaraan setingkat lain untuk menggabung.</p>
               <button class="m-close" id="set-close" type="button">Tutup</button>
             </div>
           </section>

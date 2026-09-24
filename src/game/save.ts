@@ -1,14 +1,15 @@
-import { MAX_VEHICLE_LEVEL } from '../config/balance';
-import { LEVELS } from '../config/levels';
-import { completedStageCount } from './building';
-import { projectOf, storageCapacity, trackOf, vehicleCapacity } from './economy';
-import { defaultTutorial } from './state';
-import type { GameState, Station, Vehicle } from './types';
+import { BALANCE, MAX_VEHICLE_LEVEL } from '../config/balance';
+import { CITIES } from '../config/cities';
+import { isPlotComplete, plotTarget, plotsOf, storageCapacity, trackOf, vehicleCapacity } from './economy';
+import { stageCount } from './layout';
+import { defaultTutorial, newDepot } from './state';
+import type { GameState, Vehicle } from './types';
 
-export const SAVE_KEY = 'loop-builders/save';
+export const SAVE_KEY = 'loop-builders/city-save';
 export const SETTINGS_KEY = 'loop-builders/settings';
-export const CORRUPT_KEY = 'loop-builders/save-corrupt';
-export const SCHEMA_VERSION = 1;
+export const CORRUPT_KEY = 'loop-builders/city-save-corrupt';
+/** Versi 2 = konsep kota bercabang (save versi 1 rumah tunggal tidak dipakai lagi). */
+export const SCHEMA_VERSION = 2;
 
 interface SaveFile {
   schema: number;
@@ -30,7 +31,7 @@ const isInt = (v: unknown): v is number => isNum(v) && Math.floor(v) === v;
 
 /**
  * Membaca & memvalidasi save. Mengembalikan null bila rusak/versi tidak dikenal
- * (pemanggil lalu memulai game baru dan menyimpan salinan save rusak untuk debugging).
+ * (pemanggil lalu memulai permainan baru dan menyimpan salinan save rusak).
  * Nilai yang sedikit di luar batas dirapikan (clamp) agar invarian simulasi tetap aman.
  */
 export function deserialize(raw: string): GameState | null {
@@ -43,42 +44,64 @@ export function deserialize(raw: string): GameState | null {
   if (!file || typeof file !== 'object' || file.schema !== SCHEMA_VERSION) return null;
   const s = file.state as GameState;
   if (!s || typeof s !== 'object') return null;
-  if (!isInt(s.levelIndex) || s.levelIndex < 0 || s.levelIndex >= LEVELS.length) return null;
+  if (!isInt(s.levelIndex) || s.levelIndex < 0 || s.levelIndex >= CITIES.length) return null;
   if (!isInt(s.cycle) || s.cycle < 0) return null;
-  const level = LEVELS[s.levelIndex];
-  if (!isInt(s.expandStage) || s.expandStage < 0 || s.expandStage >= level.trackStages.length) return null;
-  if (!isNum(s.money) || !isNum(s.delivered) || !isInt(s.addsPurchased) || !isInt(s.nextVehicleId)) return null;
-  if (!Array.isArray(s.vehicles) || !Array.isArray(s.stations)) return null;
-  if (s.stations.length !== level.slots.length) return null;
+  const city = CITIES[s.levelIndex];
+  if (!isInt(s.expandStage) || s.expandStage < 0 || s.expandStage >= stageCount(city)) return null;
+  if (!isNum(s.money) || !isInt(s.addsPurchased) || !isInt(s.nextVehicleId)) return null;
+  if (!Array.isArray(s.vehicles) || !Array.isArray(s.plots) || !s.depot || typeof s.depot !== 'object') return null;
+  const plotCount = plotsOf(s.levelIndex).length;
+  if (s.plots.length !== plotCount || !s.plots.every(isNum)) return null;
 
   const state: GameState = {
     levelIndex: s.levelIndex,
     cycle: s.cycle,
     money: Math.max(0, s.money),
-    delivered: Math.max(0, Math.floor(s.delivered)),
-    stagesPaid: isInt(s.stagesPaid) ? Math.max(0, s.stagesPaid) : 0,
+    plots: s.plots.map((v) => Math.max(0, Math.floor(v))),
+    streetsPaid: city.streets.map((_, i) => !!s.streetsPaid?.[i]),
     completed: !!s.completed,
     expandStage: s.expandStage,
     addsPurchased: Math.max(0, s.addsPurchased),
     vehicles: [],
     nextVehicleId: s.nextVehicleId,
-    stations: [],
+    depot: newDepot(0),
     tutorial: { ...defaultTutorial(), ...(s.tutorial ?? {}) },
     stats: {
       levelTime: isNum(s.stats?.levelTime) ? s.stats.levelTime : 0,
       totalTime: isNum(s.stats?.totalTime) ? s.stats.totalTime : 0,
       totalDelivered: isNum(s.stats?.totalDelivered) ? s.stats.totalDelivered : 0,
+      totalRent: isNum(s.stats?.totalRent) ? s.stats.totalRent : 0,
       lastLeftoverMoney: isNum(s.stats?.lastLeftoverMoney) ? s.stats.lastLeftoverMoney : 0,
       lastCompletionBonus: isNum(s.stats?.lastCompletionBonus) ? s.stats.lastCompletionBonus : 0,
     },
   };
 
-  const project = projectOf(state);
-  state.delivered = Math.min(state.delivered, project.target);
-  if (state.delivered >= project.target) state.completed = true;
-  if (state.completed && state.delivered < project.target) state.delivered = project.target;
-  // Bonus tahap yang sudah dibayar tidak boleh melebihi tahap yang benar-benar selesai.
-  state.stagesPaid = Math.min(state.stagesPaid, completedStageCount(project, state.delivered));
+  // Kavling di jalan yang belum terbuka tidak boleh punya progres; progres dibatasi target.
+  const plots = plotsOf(state.levelIndex);
+  state.plots = state.plots.map((v, i) => (city.streets[plots[i].street].unlockStage <= state.expandStage ? Math.min(v, plotTarget(state, i)) : 0));
+  const allDone = state.plots.every((_, i) => isPlotComplete(state, i));
+  if (allDone) state.completed = true;
+  if (state.completed && !allDone) state.completed = false;
+
+  // Depot
+  const d = s.depot;
+  if (!isInt(d.level) || !isInt(d.machines) || !isNum(d.storage) || !Array.isArray(d.lines) || !Array.isArray(d.timers)) return null;
+  state.depot.level = Math.max(1, Math.min(BALANCE.upgrade.maxLevel, d.level));
+  state.depot.machines = Math.max(1, Math.min(BALANCE.maxMachines, d.machines));
+  state.depot.storage = Math.max(0, Math.floor(d.storage));
+  for (let m = 0; m < BALANCE.maxMachines; m++) {
+    const line = Array.isArray(d.lines[m]) ? d.lines[m].filter(isNum).map((p) => Math.max(0, Math.min(0.999, p))) : [];
+    state.depot.lines[m] = m < state.depot.machines ? line.sort((a, b) => b - a) : [];
+    state.depot.timers[m] = isNum(d.timers[m]) ? Math.max(0, d.timers[m]) : 0;
+  }
+  // Jaga invarian stok + conveyor <= kapasitas.
+  const cap = storageCapacity(state);
+  state.depot.storage = Math.min(state.depot.storage, cap);
+  let room = cap - state.depot.storage;
+  for (let m = 0; m < state.depot.machines; m++) {
+    state.depot.lines[m] = state.depot.lines[m].slice(0, Math.max(0, room));
+    room -= state.depot.lines[m].length;
+  }
 
   const track = trackOf(state);
   const ids = new Set<number>();
@@ -87,40 +110,10 @@ export function deserialize(raw: string): GameState | null {
     if (ids.has(raw.id)) return null;
     ids.add(raw.id);
     const lv = Math.max(1, Math.min(MAX_VEHICLE_LEVEL, raw.level));
-    state.vehicles.push({
-      id: raw.id,
-      level: lv,
-      cargo: Math.max(0, Math.min(vehicleCapacity(lv), Math.floor(raw.cargo))),
-      distance: track.wrap(raw.distance),
-    });
+    state.vehicles.push({ id: raw.id, level: lv, cargo: Math.max(0, Math.min(vehicleCapacity(lv), Math.floor(raw.cargo))), distance: track.wrap(raw.distance) });
   }
   if (state.vehicles.length === 0 && !state.completed) return null;
   state.nextVehicleId = Math.max(state.nextVehicleId, ...state.vehicles.map((v) => v.id + 1), 1);
-
-  for (let i = 0; i < level.slots.length; i++) {
-    const raw = s.stations[i] as Station;
-    if (!raw || !isInt(raw.level) || !isNum(raw.storage) || !Array.isArray(raw.conveyor)) return null;
-    const unlocked = level.slots[i].unlockStage <= state.expandStage;
-    const st: Station = {
-      slot: i,
-      built: !!raw.built && unlocked,
-      level: Math.max(1, raw.level),
-      storage: Math.max(0, Math.floor(raw.storage)),
-      conveyor: raw.conveyor.filter(isNum).map((p) => Math.max(0, Math.min(0.999, p))),
-      timer: isNum(raw.timer) ? Math.max(0, raw.timer) : 0,
-    };
-    // Jaga invarian storage + conveyor <= kapasitas.
-    const cap = storageCapacity(st);
-    st.storage = Math.min(st.storage, cap);
-    st.conveyor = st.conveyor.sort((a, b) => b - a).slice(0, cap - st.storage);
-    if (!st.built) {
-      st.storage = 0;
-      st.conveyor = [];
-      st.level = 1;
-    }
-    state.stations.push(st);
-  }
-  if (!state.stations[0].built) return null;
   return state;
 }
 

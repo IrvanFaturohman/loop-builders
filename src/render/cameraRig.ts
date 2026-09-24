@@ -30,6 +30,9 @@ export class CameraRig {
   private orbit = 0;
   private orbitSpeed = 0;
   private readonly tmpCam = new THREE.PerspectiveCamera();
+  private bounds = { minX: -60, maxX: 60, minZ: -60, maxZ: 60 };
+  private minDist = 7;
+  private maxDist = 80;
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(32, aspect, 0.5, 200);
@@ -99,6 +102,38 @@ export class CameraRig {
       this.yaw = yaw;
       this.pitch = pitch;
     }
+  }
+
+  get goalDist(): number {
+    return this.goalDistance;
+  }
+
+  get currentDist(): number {
+    return this.distance;
+  }
+
+  /** Batas geser kamera (titik tatap dibatasi di dalam kotak ini). */
+  setBounds(b: { minX: number; maxX: number; minZ: number; maxZ: number }, maxDist: number): void {
+    this.bounds = b;
+    this.maxDist = Math.max(this.minDist + 1, maxDist);
+  }
+
+  /** Geser titik tatap (satuan dunia) — langsung responsif mengikuti jari. */
+  shift(dx: number, dz: number): void {
+    const b = this.bounds;
+    const nx = THREE.MathUtils.clamp(this.goalTarget.x + dx, b.minX, b.maxX);
+    const nz = THREE.MathUtils.clamp(this.goalTarget.z + dz, b.minZ, b.maxZ);
+    this.target.x += nx - this.goalTarget.x;
+    this.target.z += nz - this.goalTarget.z;
+    this.goalTarget.x = nx;
+    this.goalTarget.z = nz;
+    this.orbitSpeed = 0;
+  }
+
+  /** Zoom (f < 1 mendekat). */
+  zoom(f: number): void {
+    this.goalDistance = THREE.MathUtils.clamp(this.goalDistance * f, this.minDist, this.maxDist);
+    this.distance = THREE.MathUtils.clamp(this.distance * f, this.minDist, this.maxDist);
   }
 
   /** Sentakan kecil (misal saat bongkar muatan besar). */

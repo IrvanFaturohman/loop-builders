@@ -1,26 +1,27 @@
 import * as THREE from 'three';
 import { BALANCE } from '../config/balance';
-import { LEVELS } from '../config/levels';
+import { CITIES } from '../config/cities';
 import { stageMapping } from '../game/actions';
 import { completedModuleCount } from '../game/building';
-import { buildCost, isSlotUnlocked, productionRate, projectOf, storageCapacity, trackFor } from '../game/economy';
+import { isPlotComplete, isPlotUnlocked, pickupDistance, plotProject, plotsOf, productionRate, storageCapacity, trackFor } from '../game/economy';
 import type { GameEvent } from '../game/events';
-import type { GameState, LevelDefinition, MaterialKind, Runtime } from '../game/types';
-import { BuildingView } from './buildingView';
+import { pickupPoints, stageBounds, stageCount, streetBounds, type ResolvedPlot } from '../game/layout';
+import { depotInTransit } from '../game/sim';
+import type { CityDefinition, GameState, MaterialKind, Runtime } from '../game/types';
+import { fmt } from '../ui/format';
 import { CameraRig, type SafeArea } from './cameraRig';
+import { DepotView } from './depotView';
 import { Effects } from './effects';
 import { buildEnvironment, type EnvironmentBuild, type Rect } from './environment';
 import { LabelLayer, type WorldLabel } from './labels';
-import { fmt } from '../ui/format';
 import { THEMES } from './palette';
-import { StationView } from './stationView';
-import { TrackView } from './trackView';
+import { PlotView } from './plotView';
+import { dropTexture, TrackView } from './trackView';
 import { VehicleView } from './vehicleView';
 
-export type PickResult = { type: 'vehicle'; id: number } | { type: 'station'; slot: number } | null;
+export type PickResult = { type: 'vehicle'; id: number } | { type: 'depot' } | null;
 
 export interface WorldHooks {
-  onBuildClick(slot: number): void;
   onModulePop(index: number): void;
   onItemLand(kind: MaterialKind, big: boolean): void;
 }
@@ -34,7 +35,18 @@ interface Absorb {
   from: THREE.Vector3;
 }
 
+interface Float {
+  label: WorldLabel;
+  t: number;
+  plot: number;
+  amount: number;
+  kind: string;
+}
+
 const EXPAND_MORPH = 1.15;
+/** Bila membingkai seluruh kota butuh kamera lebih jauh dari ini, kamera fokus ke jalan aktif. */
+const FOCUS_DIST = 46;
+const MAX_FLOATS = 18;
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _t = new THREE.Vector3();
@@ -48,30 +60,33 @@ export class World {
   private readonly hemi: THREE.HemisphereLight;
   private readonly sun: THREE.DirectionalLight;
   private levelRoot = new THREE.Group();
-  private level!: LevelDefinition;
+  private city!: CityDefinition;
+  private plotsDef: ResolvedPlot[] = [];
   private material: MaterialKind = 'wood';
   private track!: TrackView;
-  private stations: StationView[] = [];
-  private stationLabels: WorldLabel[] = [];
-  private buildButtons: WorldLabel[] = [];
+  private depot!: DepotView;
+  private depotLabel!: WorldLabel;
+  private plots: PlotView[] = [];
+  private plotLabels: WorldLabel[] = [];
   private vehicles = new Map<number, VehicleView>();
   private vehicleLabels = new Map<number, WorldLabel>();
-  private building!: BuildingView;
   private env: EnvironmentBuild | null = null;
   private absorbs: Absorb[] = [];
   private spawnIds = new Set<number>();
-  private revealSlot = -1;
+  private floats: Float[] = [];
+  private revealStreet = -1;
   private revealTimer = 0;
   private boostPuffTimer = 0;
   private width = 1;
   private height = 1;
   private safe: SafeArea = { xL: -0.92, xR: 0.92, yB: -0.6, yT: 0.7 };
-  private moneyFloat: { label: WorldLabel; amount: number; t: number } | null = null;
-  private floats: { label: WorldLabel; t: number }[] = [];
   private raycaster = new THREE.Raycaster();
-  private time = 0;
+  private readonly ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  /** true setelah pemain menggeser/zoom — kamera tidak lagi otomatis membingkai ulang. */
+  manualCamera = false;
+  private lastActive = -2;
   selectedVehicle: number | null = null;
-  selectedSlot: number | null = null;
+  depotSelected = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -99,80 +114,62 @@ export class World {
   }
 
   // ---------------------------------------------------------------------------
-  // Level
+  // Kota
   // ---------------------------------------------------------------------------
 
   loadLevel(state: GameState): void {
     this.disposeLevel();
-    this.level = LEVELS[state.levelIndex];
-    this.material = this.level.material;
-    const palette = THEMES[this.level.theme];
+    this.city = CITIES[state.levelIndex];
+    this.plotsDef = plotsOf(state.levelIndex);
+    this.material = this.city.material;
+    const palette = THEMES[this.city.theme];
     this.scene.background = new THREE.Color(palette.sky);
-    this.scene.fog = new THREE.Fog(palette.fog, 45, 110);
-    this.hemi.groundColor.set(this.level.theme === 'city' ? '#b8b0a2' : '#7f9a5a');
+    this.scene.fog = new THREE.Fog(palette.fog, 55, 130);
+    this.hemi.groundColor.set(this.city.theme === 'city' ? '#b8b0a2' : '#7f9a5a');
 
-    const exclusions = this.level.slots.flatMap((s) => [
-      { x: s.storage[0], z: s.storage[1] },
-      { x: s.machine[0], z: s.machine[1] },
-      { x: (s.machine[0] + s.storage[0]) / 2, z: (s.machine[1] + s.storage[1]) / 2 },
-    ]);
-    this.track = new TrackView(palette, trackFor(state.levelIndex, state.expandStage), exclusions);
+    // Jalan (tanpa gerbang: sekarang ada banyak titik pengiriman)
+    const exclusions = [...this.plotsDef.map((p) => p.pos), ...pickupPoints(this.city), { x: 0, z: 0 }];
+    this.track = new TrackView(palette, trackFor(state.levelIndex, state.expandStage), exclusions, { gate: false });
     this.levelRoot.add(this.track.group);
 
-    // Bangunan
-    const project = projectOf(state);
-    this.building = new BuildingView(project, completedModuleCount(project, state.delivered));
-    this.building.group.position.set(this.level.housePos[0], 0, this.level.housePos[1]);
-    this.building.group.rotation.y = this.level.houseRotation;
-    this.building.onModulePop = (pos, index) => {
-      this.effects.puff(pos, { count: 4, size: 0.22, spread: 1.4, color: '#f7efdf' });
-      this.hooks.onModulePop(index);
-    };
-    this.levelRoot.add(this.building.group);
+    // Depot + teluk muat di keempat sisi
+    const lastStage = stageCount(this.city) - 1;
+    const tFull = trackFor(state.levelIndex, lastStage);
+    const bays = [0, 1, 2, 3].map((i) => {
+      const d = pickupDistance(state.levelIndex, lastStage, i);
+      const q = tFull.pointAt(d);
+      const tan = tFull.tangentAt(d);
+      return { pos: q, heading: Math.atan2(-tan.z, tan.x) + Math.PI / 2 };
+    });
+    this.depot = new DepotView(this.material, this.city.hubHalf - 0.85, this.city.theme === 'city' ? '#e2ddd3' : '#e0d3b8', bays, dropTexture());
+    this.levelRoot.add(this.depot.group);
+    this.depotLabel = this.labels.create('station-label depot-label');
 
-    // Stasiun
-    this.level.slots.forEach((def, i) => {
-      const sv = new StationView(i, def, this.material);
-      this.stations.push(sv);
-      this.levelRoot.add(sv.group);
-      const lbl = this.labels.create('station-label');
-      this.stationLabels.push(lbl);
-      const btn = this.labels.create('build-btn', '', true);
-      btn.el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.hooks.onBuildClick(i);
-      });
-      btn.el.addEventListener('pointerdown', (e) => e.stopPropagation());
-      this.buildButtons.push(btn);
+    // Kavling
+    this.plotsDef.forEach((p, i) => {
+      const proj = plotProject(state, i);
+      const pv = new PlotView(p, proj, completedModuleCount(proj, state.plots[i]), palette.site, this.city.theme === 'city' ? '#9bd57a' : '#8fd16a');
+      pv.building.onModulePop = (pos, index) => {
+        this.effects.puff(pos, { count: 3, size: 0.16, spread: 1.1, color: '#f7efdf' });
+        this.hooks.onModulePop(index);
+      };
+      pv.setVisible(isPlotUnlocked(state, i), false);
+      this.plots.push(pv);
+      this.levelRoot.add(pv.group);
+      this.plotLabels.push(this.labels.create('plot-label'));
     });
 
-    // Lingkungan
-    const keepOut: Rect[] = [];
-    for (let s = 0; s < this.level.trackStages.length; s++) {
-      const b = trackFor(state.levelIndex, s).bounds();
-      keepOut.push({ minX: b.minX - 1.2, maxX: b.maxX + 1.2, minZ: b.minZ - 1.2, maxZ: b.maxZ + 1.2 });
-    }
-    for (const s of this.level.slots) {
-      keepOut.push({
-        minX: Math.min(s.machine[0], s.storage[0]) - 1.2,
-        maxX: Math.max(s.machine[0], s.storage[0]) + 1.2,
-        minZ: Math.min(s.machine[1], s.storage[1]) - 1.2,
-        maxZ: Math.max(s.machine[1], s.storage[1]) + 1.2,
-      });
-    }
-    const hb = this.building.worldBounds();
-    const site: Rect = { minX: hb.min.x - 0.9, maxX: hb.max.x + 0.9, minZ: hb.min.z - 0.9, maxZ: hb.max.z + 0.6 };
-    const b0 = trackFor(state.levelIndex, 0).bounds();
-    const inner: Rect = { minX: b0.minX + 1.35, maxX: b0.maxX - 1.35, minZ: b0.minZ + 1.35, maxZ: b0.maxZ - 1.35 };
-    this.env = buildEnvironment(this.level.theme, palette, keepOut, site, inner.maxX > inner.minX + 0.5 && inner.maxZ > inner.minZ + 0.5 ? inner : null);
+    // Lingkungan (pohon dll. di luar area kota penuh, termasuk jalan yang belum dibuka)
+    const full = stageBounds(this.city, lastStage);
+    const keepOut: Rect[] = [{ minX: full.minX - 0.6, maxX: full.maxX + 0.6, minZ: full.minZ - 0.6, maxZ: full.maxZ + 0.6 }];
+    const H = this.city.hubHalf;
+    this.env = buildEnvironment(this.city.theme, palette, keepOut, { minX: -H + 0.8, maxX: H - 0.8, minZ: -H + 0.8, maxZ: H - 0.8 }, null);
     this.levelRoot.add(this.env.group);
 
-    // Bayangan mencakup seluruh area main
-    const all = keepOut.reduce((a, r) => ({ minX: Math.min(a.minX, r.minX), maxX: Math.max(a.maxX, r.maxX), minZ: Math.min(a.minZ, r.minZ), maxZ: Math.max(a.maxZ, r.maxZ) }), { ...site });
-    const cx = (all.minX + all.maxX) / 2;
-    const cz = (all.minZ + all.maxZ) / 2;
-    const ext = Math.max(all.maxX - all.minX, all.maxZ - all.minZ) / 2 + 3;
-    this.sun.position.set(cx - 9, 22, cz + 12);
+    const cx = (full.minX + full.maxX) / 2;
+    const cz = (full.minZ + full.maxZ) / 2;
+    const ext = Math.max(full.maxX - full.minX, full.maxZ - full.minZ) / 2 + 3;
+    this.sun.position.set(cx - 10, 24, cz + 13);
     this.sun.target.position.set(cx, 0, cz);
     const sc = this.sun.shadow.camera;
     sc.left = -ext;
@@ -180,11 +177,11 @@ export class World {
     sc.top = ext;
     sc.bottom = -ext;
     sc.near = 1;
-    sc.far = 70;
+    sc.far = 80;
     sc.updateProjectionMatrix();
 
-    // Kendaraan
     for (const v of state.vehicles) this.ensureVehicle(v.id, v.level).setCargoNow(v.cargo);
+    this.manualCamera = false;
     this.frameCamera(state, true);
   }
 
@@ -195,22 +192,20 @@ export class World {
     this.spawnIds.clear();
     this.labels.clear();
     this.vehicleLabels.clear();
-    this.stationLabels = [];
-    this.buildButtons = [];
-    this.stations = [];
+    this.plotLabels = [];
     this.floats = [];
-    this.moneyFloat = null;
     this.track?.dispose();
-    this.building?.dispose();
+    for (const p of this.plots) p.dispose();
+    this.plots = [];
     this.env?.dispose();
     this.env = null;
     this.effects.clear();
     this.scene.remove(this.levelRoot);
     this.levelRoot = new THREE.Group();
     this.scene.add(this.levelRoot);
-    this.selectedSlot = null;
     this.selectedVehicle = null;
-    this.revealSlot = -1;
+    this.revealStreet = -1;
+    this.lastActive = -2;
   }
 
   // ---------------------------------------------------------------------------
@@ -225,30 +220,66 @@ export class World {
     const top = 1 - (2 * safeTopPx) / this.height;
     const bottom = -1 + (2 * safeBottomPx) / this.height;
     const right = 0.94 - (2 * safeRightPx) / this.width;
-    this.safe = { xL: -0.9, xR: Math.max(-0.4, right - 0.04), yB: Math.min(bottom, top - 0.3), yT: top };
-    if (state) this.frameCamera(state, true);
+    this.safe = { xL: -0.92, xR: Math.max(-0.4, right - 0.02), yB: Math.min(bottom, top - 0.3), yT: top };
+    if (state && !this.manualCamera) this.frameCamera(state, true);
   }
 
-  /** Framing gameplay (lintasan + stasiun + bangunan) atau sorotan bangunan saat selesai. */
-  frameCamera(state: GameState, immediate: boolean): void {
-    const pts: THREE.Vector3[] = [];
-    const hb = this.building.worldBounds();
-    if (state.completed) {
-      for (const x of [hb.min.x, hb.max.x]) for (const y of [0, hb.max.y]) for (const z of [hb.min.z, hb.max.z]) pts.push(new THREE.Vector3(x, y, z));
-      pts.push(new THREE.Vector3((hb.min.x + hb.max.x) / 2, 0, hb.max.z + 2.5));
-      this.rig.fit(pts, this.safe, { yaw: 0.45, pitch: 0.62, immediate, ease: 1.6, orbit: 0.3 });
-      return;
+  /** Jalan yang sedang dibangun (kavling terbuka pertama yang belum jadi), atau -1. */
+  private activeStreet(state: GameState): number {
+    for (const p of this.plotsDef) if (isPlotUnlocked(state, p.index) && !isPlotComplete(state, p.index)) return p.street;
+    return -1;
+  }
+
+  /**
+   * Bingkai kamera: seluruh kota yang sudah terbuka bila masih cukup besar di layar;
+   * kalau kota sudah terlalu lebar untuk layar portrait, fokus ke depot + jalan yang sedang
+   * dibangun (tombol peta = lihat seluruh kota). Saat kota selesai: sorotan seluruh kota.
+   */
+  frameCamera(state: GameState, immediate: boolean, forceAll = false, focus?: number): void {
+    const fitRect = (b: { minX: number; maxX: number; minZ: number; maxZ: number }, done: boolean) => {
+      const pts: THREE.Vector3[] = [];
+      for (const x of [b.minX, b.maxX]) for (const z of [b.minZ, b.maxZ]) for (const y of [0, 2.2]) pts.push(new THREE.Vector3(x, y, z));
+      this.rig.fit(pts, this.safe, { yaw: done ? 0.4 : 0.22, pitch: done ? 0.78 : 0.95, immediate, ease: done ? 1.4 : 2.2, orbit: done ? 0.25 : 0 });
+    };
+    const done = state.completed;
+    fitRect(stageBounds(this.city, state.expandStage), done);
+    const active = focus ?? this.activeStreet(state);
+    if (!done && !forceAll && active >= 0 && this.rig.goalDist > FOCUS_DIST) {
+      const H = this.city.hubHalf + 0.9;
+      const s = streetBounds(this.city, active);
+      fitRect({ minX: Math.min(-H, s.minX), maxX: Math.max(H, s.maxX), minZ: Math.min(-H, s.minZ), maxZ: Math.max(H, s.maxZ) }, false);
     }
-    const b = trackFor(state.levelIndex, state.expandStage).bounds();
-    for (const x of [b.minX - 0.9, b.maxX + 0.9]) for (const z of [b.minZ - 0.9, b.maxZ + 0.9]) pts.push(new THREE.Vector3(x, 0, z));
-    this.level.slots.forEach((s, i) => {
-      if (!isSlotUnlocked(state, i)) return;
-      for (const [x, z] of [s.machine, s.storage]) {
-        pts.push(new THREE.Vector3(x - 0.7, 0, z - 0.7), new THREE.Vector3(x + 0.7, 1.6, z + 0.7));
-      }
-    });
-    for (const x of [hb.min.x, hb.max.x]) for (const y of [0, hb.max.y]) for (const z of [hb.min.z, hb.max.z]) pts.push(new THREE.Vector3(x, y, z));
-    this.rig.fit(pts, this.safe, { yaw: 0.24, pitch: 0.95, immediate, ease: 2.2 });
+    const full = stageBounds(this.city, stageCount(this.city) - 1);
+    this.rig.setBounds({ minX: full.minX, maxX: full.maxX, minZ: full.minZ, maxZ: full.maxZ }, 90);
+  }
+
+  /** Geser kamera sesuai seretan jari (piksel layar). */
+  pan(dxPx: number, dyPx: number, rect: DOMRect): void {
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const a = this.groundAt(cx, cy, rect);
+    const b = this.groundAt(cx + dxPx, cy + dyPx, rect);
+    if (!a || !b) return;
+    this.manualCamera = true;
+    this.rig.shift(a.x - b.x, a.z - b.z);
+  }
+
+  zoom(f: number): void {
+    this.manualCamera = true;
+    this.rig.zoom(f);
+  }
+
+  /** Tombol peta: lihat seluruh kota (setelah itu kamera bebas sampai ada jalan baru). */
+  overview(state: GameState): void {
+    this.frameCamera(state, false, true);
+    this.manualCamera = true;
+  }
+
+  private groundAt(clientX: number, clientY: number, rect: DOMRect): THREE.Vector3 | null {
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(new THREE.Vector2(x, y), this.rig.camera);
+    return this.raycaster.ray.intersectPlane(this.ground, new THREE.Vector3());
   }
 
   // ---------------------------------------------------------------------------
@@ -259,78 +290,94 @@ export class World {
     for (const e of events) {
       switch (e.type) {
         case 'produced': {
-          const sv = this.stations[e.slot];
-          sv.onProduced();
-          if (Math.random() < 0.5) this.effects.puff(sv.chimneyWorld(_v), { count: 1, size: 0.2, spread: 0.2, up: 1.4, life: 0.9, color: '#f4f4f4' });
+          const sv = this.depot.lines[e.line];
+          sv?.onProduced();
+          if (sv && Math.random() < 0.35) this.effects.puff(sv.chimneyWorld(_v), { count: 1, size: 0.16, spread: 0.2, up: 1.4, life: 0.9, color: '#f4f4f4' });
           break;
         }
         case 'stored':
-          this.stations[e.slot].onStored();
+          this.depot.onStored();
           break;
         case 'pickup': {
           const view = this.vehicles.get(e.vehicleId);
           if (!view) break;
-          const from = this.stations[e.slot].storageTop(new THREE.Vector3());
+          const from = this.depot.storageTop(new THREE.Vector3());
           const n = Math.min(e.amount, 6);
           for (let i = 0; i < n; i++) {
-            this.effects.fly(this.material, from.clone().add(_v.set((Math.random() - 0.5) * 0.4, 0, (Math.random() - 0.5) * 0.4)), view.bedWorld(new THREE.Vector3()), {
+            this.effects.fly(this.material, from.clone().add(_v.set((Math.random() - 0.5) * 0.6, 0, (Math.random() - 0.5) * 0.6)), view.bedWorld(new THREE.Vector3()), {
               delay: i * 0.035,
-              dur: 0.26,
-              height: 0.9,
+              dur: 0.34,
+              height: 1.3,
               getTo: () => view.bedWorld(_t),
-              scale: 0.9,
+              scale: 0.85,
             });
           }
-          view.queueCargo(e.cargo, 0.26 + n * 0.035);
+          view.queueCargo(e.cargo, 0.34 + n * 0.035);
+          this.depot.pulseBay(e.bay);
           break;
         }
-        case 'unload': {
+        case 'deliver': {
           const view = this.vehicles.get(e.vehicleId);
-          const from = view ? view.bedWorld(new THREE.Vector3()) : this.track.pointAt(0, new THREE.Vector3()).setY(0.8);
-          view?.setCargoNow(0);
-          view?.dump();
-          const targets = this.building.scheduleModules(e.fromModule, e.toModule, 0.3);
-          const n = Math.min(e.amount, 10);
+          const v = state.vehicles.find((x) => x.id === e.vehicleId);
+          const pv = this.plots[e.plot];
+          const from = view ? view.bedWorld(new THREE.Vector3()) : pv.topWorld(new THREE.Vector3());
+          view?.setCargoNow(v?.cargo ?? 0);
+          if (view && (v?.cargo ?? 0) === 0) view.dump();
+          const targets = pv.building.scheduleModules(e.fromModule, e.toModule, 0.28);
+          const n = Math.min(e.amount, 8);
           const big = e.amount >= 20;
           for (let i = 0; i < n; i++) {
             const to = targets[i % targets.length].clone();
-            const first = i === 0;
             this.effects.fly(this.material, from.clone().add(_v.set(0, i * 0.03, 0)), to, {
               delay: i * 0.03,
-              dur: 0.34 + Math.random() * 0.08,
-              height: 2.2 + Math.random() * 0.8,
-              scale: big ? 1.15 : 1,
-              onLand: first
-                ? () => {
-                    this.effects.puff(to, { count: big ? 8 : 5, size: big ? 0.34 : 0.26, spread: 1.6 });
-                    this.hooks.onItemLand(this.material, big);
-                  }
-                : undefined,
+              dur: 0.32 + Math.random() * 0.06,
+              height: 1.4 + Math.random() * 0.5,
+              scale: big ? 1.1 : 0.95,
+              onLand:
+                i === 0
+                  ? () => {
+                      this.effects.puff(to, { count: big ? 6 : 3, size: big ? 0.26 : 0.2, spread: 1.3 });
+                      this.hooks.onItemLand(this.material, big);
+                    }
+                  : undefined,
             });
           }
-          this.effects.puff(from.clone().setY(0.2), { count: 3 + Math.min(6, Math.floor(e.amount / 6)), size: 0.24, spread: 1.2 });
-          this.track.pulseGate(Math.min(1, e.amount / 30));
-          this.rig.bump(0.12 + Math.min(0.5, Math.log10(1 + e.amount) * 0.22));
-          this.floatMoney(e.money);
+          if (big) this.rig.bump(0.12 + Math.min(0.4, Math.log10(1 + e.amount) * 0.15));
+          this.float(e.plot, e.money, 'float-money', pv.topWorld(new THREE.Vector3()));
           break;
         }
-        case 'stageComplete': {
-          this.building.stageBounce(1);
-          const hb = this.building.worldBounds();
-          const c = hb.getCenter(new THREE.Vector3());
-          c.y = hb.max.y * 0.7;
-          this.effects.sparkle(c, 16);
-          this.floatText(`Tahap selesai! +${e.bonus}`, c.clone().setY(hb.max.y + 0.4), 'float-stage');
+        case 'plotComplete': {
+          const pv = this.plots[e.plot];
+          pv.markComplete();
+          pv.building.stageBounce(1.4);
+          const top = pv.topWorld(new THREE.Vector3());
+          this.effects.sparkle(top, 14);
+          this.effects.confettiBurst(top, 24);
+          break;
+        }
+        case 'rent': {
+          const pv = this.plots[e.plot];
+          const top = pv.topWorld(new THREE.Vector3());
+          this.float(e.plot, e.amount, 'float-rent', top);
+          if (Math.random() < 0.6) this.effects.sparkle(top, 3, ['#ffd34a', '#fff6c2']);
+          break;
+        }
+        case 'streetComplete': {
+          const plots = this.plotsDef.filter((p) => p.street === e.street);
+          const end = plots.find((p) => p.def.lane === 'end') ?? plots[0];
+          const top = this.plots[end.index].topWorld(new THREE.Vector3()).add(_v.set(0, 0.6, 0));
+          this.effects.confettiBurst(top, 60);
+          this.floatText(`${this.city.streets[e.street].name} lengkap! +${fmt(e.bonus)}`, top, 'float-stage');
           break;
         }
         case 'projectComplete': {
-          this.building.stageBounce(1.8);
-          const hb = this.building.worldBounds();
-          const c = hb.getCenter(new THREE.Vector3());
-          c.y = hb.max.y;
-          this.effects.confettiBurst(c, 150);
-          this.effects.sparkle(c, 24);
-          setTimeout(() => this.effects.confettiBurst(c.clone().add(_v2.set(1.5, 0, 0)), 90), 450);
+          const b = stageBounds(this.city, state.expandStage);
+          for (let i = 0; i < 4; i++) {
+            const p = new THREE.Vector3(THREE.MathUtils.lerp(b.minX, b.maxX, Math.random()), 3, THREE.MathUtils.lerp(b.minZ, b.maxZ, Math.random()));
+            setTimeout(() => this.effects.confettiBurst(p, 70), i * 250);
+          }
+          this.effects.sparkle(new THREE.Vector3(0, 2, 0), 24);
+          this.manualCamera = false;
           this.frameCamera(state, false);
           break;
         }
@@ -352,30 +399,23 @@ export class World {
           const to = trackFor(state.levelIndex, e.to);
           const inv = stageMapping(state.levelIndex, e.from, e.to).inverse();
           this.track.startMorph(from, to, inv, EXPAND_MORPH);
-          const newSlot = this.level.slots.findIndex((s) => s.unlockStage === e.to);
-          this.revealSlot = newSlot;
-          this.revealTimer = EXPAND_MORPH + 0.1;
-          this.frameCamera(state, false);
-          // debu sepanjang tepi yang bergerak
-          const L = to.length;
-          for (let k = 0; k < 10; k++) {
-            const p = to.pointAt((k / 10) * L);
-            this.effects.puff(_v.set(p.x, 0.1, p.z), { count: 2, size: 0.3, spread: 0.8, color: '#efe6d2' });
-          }
+          this.revealStreet = this.city.streets.findIndex((s) => s.unlockStage === e.to);
+          this.revealTimer = EXPAND_MORPH + 0.05;
+          this.manualCamera = false;
+          this.frameCamera(state, false, false, this.revealStreet);
           break;
         }
-        case 'build': {
-          const sv = this.stations[e.slot];
+        case 'machine': {
+          const sv = this.depot.lines[e.line];
           sv.onBuilt();
           const c = sv.padCenter(new THREE.Vector3());
-          this.effects.puff(c.clone().setY(0.2), { count: 10, size: 0.35, spread: 2 });
-          this.effects.sparkle(c, 14);
+          this.effects.puff(c.clone().setY(0.2), { count: 8, size: 0.28, spread: 1.6 });
+          this.effects.sparkle(c, 12);
           break;
         }
         case 'upgrade': {
-          const sv = this.stations[e.slot];
-          sv.onUpgrade();
-          this.effects.sparkle(sv.chimneyWorld(new THREE.Vector3()).setY(1.4), 12, ['#7cf0b8', '#ffffff', '#ffd34a']);
+          for (let i = 0; i < state.depot.machines; i++) this.depot.lines[i].onUpgrade();
+          this.effects.sparkle(new THREE.Vector3(0, 1.4, 0), 16, ['#7cf0b8', '#ffffff', '#ffd34a']);
           break;
         }
         default:
@@ -384,24 +424,24 @@ export class World {
     }
   }
 
-  private floatMoney(amount: number): void {
-    if (this.moneyFloat && this.moneyFloat.t < 0.25) {
-      this.moneyFloat.amount += amount;
-      this.moneyFloat.label.set(`+${this.moneyFloat.amount}`);
+  /** Angka mengambang di atas kavling; angka beruntun di kavling yang sama digabung. */
+  private float(plot: number, amount: number, kind: string, pos: THREE.Vector3): void {
+    const same = this.floats.find((f) => f.plot === plot && f.kind === kind && f.t < 0.3);
+    if (same) {
+      same.amount += amount;
+      same.label.set(`+${fmt(same.amount)}`);
       return;
     }
-    const pos = this.track.pointAt(0, new THREE.Vector3());
-    pos.y = 1.6;
-    const label = this.labels.create('float-money', `+${amount}`);
+    if (this.floats.length >= MAX_FLOATS) return; // batas keras: uang tetap masuk, hanya visualnya dilewati
+    const label = this.labels.create(kind, `+${fmt(amount)}`);
     label.pos.copy(pos);
-    this.moneyFloat = { label, amount, t: 0 };
-    this.floats.push({ label, t: 0 });
+    this.floats.push({ label, t: 0, plot, amount, kind });
   }
 
   private floatText(text: string, pos: THREE.Vector3, cls: string): void {
     const label = this.labels.create(cls, text);
     label.pos.copy(pos);
-    this.floats.push({ label, t: -0.6 });
+    this.floats.push({ label, t: -0.8, plot: -1, amount: 0, kind: cls });
   }
 
   // ---------------------------------------------------------------------------
@@ -424,13 +464,11 @@ export class World {
   }
 
   update(dt: number, state: GameState, rt: Runtime): void {
-    this.time += dt;
     this.track.update(dt);
-    this.building.update(dt);
     const frozen = rt.freeze > 0 || state.completed;
     const speed = frozen ? 0 : BALANCE.vehicleSpeed * rt.boost.mult * 0.3;
 
-    // Kendaraan dari state
+    // Kendaraan
     const seen = new Set<number>();
     const selLevel = this.selectedVehicle !== null ? state.vehicles.find((v) => v.id === this.selectedVehicle)?.level : undefined;
     for (const v of state.vehicles) {
@@ -444,11 +482,10 @@ export class World {
       view.mergeable = selLevel !== undefined && !view.selected && v.level === selLevel && v.level < BALANCE.vehicleCapacity.length;
       view.update(dt, _v, Math.atan2(-_v2.z, _v2.x), speed, rt.boost.mult);
       const lbl = this.vehicleLabels.get(v.id)!;
-      lbl.pos.copy(view.group.position).setY(1.25 + 0.1 * view.displayLevel);
+      lbl.pos.copy(view.group.position).setY(1.2 + 0.1 * view.displayLevel);
       const cargo = Math.round(view.visualCargo);
       lbl.set(`<b>${view.displayLevel}</b>${cargo > 0 ? `<span>${cargo}</span>` : ''}`);
-      lbl.setClass(`lv${Math.min(6, view.displayLevel)}`, true);
-      for (let l = 1; l <= 6; l++) if (l !== view.displayLevel) lbl.setClass(`lv${l}`, false);
+      for (let l = 1; l <= 6; l++) lbl.setClass(`lv${l}`, l === view.displayLevel);
       lbl.setClass('selected', view.selected);
       lbl.setClass('mergeable', view.mergeable);
     }
@@ -488,60 +525,62 @@ export class World {
       }
     }
     this.absorbs = this.absorbs.filter((a) => a.t < 0.38);
-    for (const a of this.absorbs) {
-      if (!a.view.group.parent) this.levelRoot.add(a.view.group);
-    }
 
-    // Debu boost di belakang roda
+    // Debu boost
     if (!frozen && rt.boost.mult > 1.2) {
       this.boostPuffTimer -= dt;
       if (this.boostPuffTimer <= 0) {
-        this.boostPuffTimer = 0.07;
+        this.boostPuffTimer = 0.08;
         for (const view of this.vehicles.values()) {
-          if (Math.random() < 0.6) {
+          if (Math.random() < 0.5) {
             view.group.localToWorld(_v.set(-0.55, 0.1, (Math.random() - 0.5) * 0.4));
-            this.effects.puff(_v, { count: 1, size: 0.16, spread: 0.3, up: 0.5, life: 0.4, color: '#f3ead8' });
+            this.effects.puff(_v, { count: 1, size: 0.15, spread: 0.3, up: 0.5, life: 0.4, color: '#f3ead8' });
           }
         }
       }
     }
 
-    // Stasiun
+    // Depot
+    const cap = storageCapacity(state);
+    const full = state.depot.storage + depotInTransit(state) >= cap;
+    this.depot.update(dt, { machines: state.depot.machines, storage: state.depot.storage, capacity: cap, lines: state.depot.lines, full, rate: productionRate(state) });
+    this.depot.lines.forEach((l) => l.setSelected(this.depotSelected && !state.completed));
+    this.depotLabel.visible = !state.completed;
+    if (this.depotLabel.visible) {
+      this.depot.labelAnchor(this.depotLabel.pos);
+      const isFull = state.depot.storage >= cap;
+      this.depotLabel.set(`<i>${isFull ? 'PENUH' : `Lv${state.depot.level}`}</i>${state.depot.storage}/${cap}`);
+      this.depotLabel.setClass('full', isFull);
+      this.depotLabel.setClass('empty', state.depot.storage === 0);
+    }
+
+    // Kavling: tampil saat jalannya terbuka (jalan baru muncul setelah animasi tumbuh)
     if (this.revealTimer > 0) {
       this.revealTimer -= dt;
-      if (this.revealTimer <= 0 && this.revealSlot >= 0) {
-        const sv = this.stations[this.revealSlot];
-        const c = sv.padCenter(new THREE.Vector3());
-        this.effects.sparkle(c, 22, ['#fff6c2', '#ffffff', '#9be8ff']);
-        this.effects.puff(c.clone().setY(0.2), { count: 8, size: 0.3, spread: 1.6 });
-        this.revealSlot = -1;
+      if (this.revealTimer <= 0 && this.revealStreet >= 0) {
+        for (const p of this.plotsDef.filter((q) => q.street === this.revealStreet)) {
+          this.plots[p.index].setVisible(true, true);
+          this.effects.sparkle(new THREE.Vector3(p.pos.x, 0.8, p.pos.z), 8, ['#fff6c2', '#ffffff', '#9be8ff']);
+        }
+        this.revealStreet = -1;
       }
     }
-    state.stations.forEach((st, i) => {
-      const sv = this.stations[i];
-      const unlocked = isSlotUnlocked(state, i) && !(i === this.revealSlot && this.revealTimer > 0);
-      const cap = storageCapacity(st);
-      const full = st.storage + st.conveyor.length >= cap;
-      sv.setSelected(this.selectedSlot === i && !state.completed);
-      sv.update(dt, { unlocked, built: st.built, level: st.level, storage: st.storage, capacity: cap, conveyor: st.conveyor, full, rate: st.built ? productionRate(state, st) : 0 });
-      const lbl = this.stationLabels[i];
-      const btn = this.buildButtons[i];
-      lbl.visible = unlocked && st.built && !state.completed;
+    const nextOfStreet = new Map<number, number>();
+    for (const p of this.plotsDef) {
+      if (!nextOfStreet.has(p.street) && isPlotUnlocked(state, p.index) && !isPlotComplete(state, p.index)) nextOfStreet.set(p.street, p.index);
+    }
+    this.plots.forEach((pv, i) => {
+      const unlocked = isPlotUnlocked(state, i) && !(this.revealStreet >= 0 && this.plotsDef[i].street === this.revealStreet);
+      pv.setVisible(unlocked, false);
+      pv.update(dt);
+      const lbl = this.plotLabels[i];
+      const have = state.plots[i];
+      const complete = isPlotComplete(state, i);
+      const target = plotProject(state, i).target;
+      lbl.visible = unlocked && !complete && !state.completed && (have > 0 || nextOfStreet.get(this.plotsDef[i].street) === i);
       if (lbl.visible) {
-        sv.labelAnchor(lbl.pos);
-        const isFull = st.storage >= cap;
-        lbl.set(`<i>${isFull ? 'PENUH' : `Lv${st.level}`}</i>${st.storage}/${cap}`);
-        lbl.setClass('full', isFull);
-        lbl.setClass('empty', st.storage === 0);
-      }
-      btn.visible = unlocked && !st.built && !state.completed;
-      if (btn.visible) {
-        // Tombol duduk di atas alas slot (bukan melayang tinggi) agar tidak menutupi stasiun tetangga.
-        sv.padCenter(btn.pos).setY(0.1);
-        btn.dy = 22;
-        const cost = buildCost(state, i);
-        btn.set(`<span>Bangun Mesin</span><b>${fmt(cost)}</b>`);
-        btn.setClass('locked', state.money < cost);
+        pv.topWorld(lbl.pos);
+        lbl.set(`${have}/${target}<i style="width:${Math.round((have / target) * 100)}%"></i>`);
       }
     });
 
@@ -551,13 +590,23 @@ export class World {
       if (f.t > 1.1) this.labels.remove(f.label);
     }
     this.floats = this.floats.filter((f) => f.t <= 1.1);
-    if (this.moneyFloat) {
-      this.moneyFloat.t += dt;
-      if (this.moneyFloat.t > 1.1) this.moneyFloat = null;
+
+    // Kamera otomatis pindah ke jalan berikutnya saat jalan aktif berganti.
+    const act = this.activeStreet(state);
+    if (act !== this.lastActive) {
+      const first = this.lastActive === -2;
+      this.lastActive = act;
+      if (!first && !this.manualCamera && !state.completed && act >= 0) this.frameCamera(state, false);
     }
 
     this.effects.update(dt);
     this.rig.update(dt);
+    // Kabut mengikuti jarak kamera supaya tampilan jauh tidak pudar.
+    if (this.scene.fog instanceof THREE.Fog) {
+      const d = this.rig.currentDist;
+      this.scene.fog.near = d * 1.25;
+      this.scene.fog.far = d * 3.2;
+    }
     this.labels.update(this.rig.camera, this.width, this.height);
   }
 
@@ -566,45 +615,34 @@ export class World {
   }
 
   // ---------------------------------------------------------------------------
-  // Picking (tap kendaraan / stasiun)
+  // Picking
   // ---------------------------------------------------------------------------
 
   pick(clientX: number, clientY: number, rect: DOMRect): PickResult {
     const x = ((clientX - rect.left) / rect.width) * 2 - 1;
     const y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(new THREE.Vector2(x, y), this.rig.camera);
-    const targets: THREE.Object3D[] = [];
+    const targets: THREE.Object3D[] = [this.depot.hit];
     for (const v of this.vehicles.values()) targets.push(v.hit);
-    for (let i = 0; i < this.stations.length; i++) if (this.stations[i].group.visible) targets.push(this.stations[i].hit);
     const hits = this.raycaster.intersectObjects(targets, false);
-    // Prioritaskan kendaraan (kecil & bergerak) di atas stasiun.
     const vh = hits.find((h) => h.object.userData.type === 'vehicle');
     if (vh) return { type: 'vehicle', id: vh.object.userData.id };
-    // Toleransi layar untuk kendaraan yang bergerak cepat.
     let best: { id: number; d: number } | null = null;
     for (const v of this.vehicles.values()) {
       _v.copy(v.group.position).setY(0.4).project(this.rig.camera);
       const sx = (_v.x * 0.5 + 0.5) * rect.width + rect.left;
       const sy = (-_v.y * 0.5 + 0.5) * rect.height + rect.top;
       const d = Math.hypot(sx - clientX, sy - clientY);
-      if (d < 34 && (!best || d < best.d)) best = { id: v.id, d };
+      if (d < 30 && (!best || d < best.d)) best = { id: v.id, d };
     }
     if (best) return { type: 'vehicle', id: best.id };
-    const sh = hits.find((h) => h.object.userData.type === 'station');
-    if (sh) return { type: 'station', slot: sh.object.userData.slot };
+    if (hits.some((h) => h.object.userData.type === 'depot')) return { type: 'depot' };
     return null;
   }
 
-  /** Titik atas-tengah tombol "Bangun Mesin" di dunia (px relatif kontainer), bila terlihat. */
-  buildButtonAnchor(slot: number): { x: number; y: number } | null {
-    const b = this.buildButtons[slot];
-    if (!b || !b.visible || b.el.style.display === 'none') return null;
-    const r = b.el.getBoundingClientRect();
-    const root = this.labels.root.getBoundingClientRect();
-    return { x: r.left - root.left + r.width / 2, y: r.top - root.top - 8 };
-  }
-
-  get buildingGhostCount(): number {
-    return this.building.ghostCount;
+  /** Titik layar (px relatif kontainer) di atas depot — untuk tutorial. */
+  depotScreen(): { x: number; y: number } {
+    _v.set(0, 1.6, 0).project(this.rig.camera);
+    return { x: (_v.x * 0.5 + 0.5) * this.width, y: (-_v.y * 0.5 + 0.5) * this.height };
   }
 }

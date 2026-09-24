@@ -1,61 +1,64 @@
-import { LEVELS } from '../config/levels';
-import { trackFor } from './economy';
-import type { GameState, Runtime, Station, TutorialFlags } from './types';
+import { BALANCE } from '../config/balance';
+import { CITIES } from '../config/cities';
+import { pickupDistance, plotsOf, trackFor } from './economy';
+import type { Depot, GameState, Runtime, TutorialFlags } from './types';
 
 export function defaultTutorial(): TutorialFlags {
-  return { boost: false, add: false, merge: false, expand: false, build: false, upgrade: false };
+  return { boost: false, add: false, merge: false, expand: false, machine: false, upgrade: false };
 }
 
-/** State awal permainan baru (level 1). */
+export function newDepot(startStorage: number): Depot {
+  return {
+    level: 1,
+    machines: 1,
+    storage: startStorage,
+    lines: Array.from({ length: BALANCE.maxMachines }, () => []),
+    timers: Array.from({ length: BALANCE.maxMachines }, () => 0),
+  };
+}
+
+/** State awal permainan baru (kota pertama). */
 export function createNewGame(): GameState {
   const state: GameState = {
     levelIndex: 0,
     cycle: 0,
     money: 0,
-    delivered: 0,
-    stagesPaid: 0,
+    plots: [],
+    streetsPaid: [],
     completed: false,
     expandStage: 0,
     addsPurchased: 0,
     vehicles: [],
     nextVehicleId: 1,
-    stations: [],
+    depot: newDepot(0),
     tutorial: defaultTutorial(),
-    stats: { levelTime: 0, totalTime: 0, totalDelivered: 0, lastLeftoverMoney: 0, lastCompletionBonus: 0 },
+    stats: { levelTime: 0, totalTime: 0, totalDelivered: 0, totalRent: 0, lastLeftoverMoney: 0, lastCompletionBonus: 0 },
   };
   setupLevel(state, 0, 0);
   return state;
 }
 
 /**
- * Menyiapkan level (proyek) baru: lintasan tahap 0, satu mesin, satu kendaraan Lv1.
- * Uang, tutorial, dan statistik total dibawa dari level sebelumnya.
+ * Menyiapkan kota baru: jalan tahap 0, satu mesin, satu kendaraan Lv1.
+ * Uang, tutorial, dan statistik total dibawa dari kota sebelumnya.
  */
 export function setupLevel(state: GameState, levelIndex: number, cycle: number): void {
-  const level = LEVELS[levelIndex];
+  const city = CITIES[levelIndex];
   state.levelIndex = levelIndex;
   state.cycle = cycle;
-  state.delivered = 0;
-  state.stagesPaid = 0;
+  state.plots = plotsOf(levelIndex).map(() => 0);
+  state.streetsPaid = city.streets.map(() => false);
   state.completed = false;
   state.expandStage = 0;
   state.addsPurchased = 0;
   state.stats.levelTime = 0;
   state.stats.lastLeftoverMoney = 0;
   state.stats.lastCompletionBonus = 0;
-  state.stations = level.slots.map(
-    (s, i): Station => ({
-      slot: i,
-      built: s.unlockStage === 0 && i === 0,
-      level: 1,
-      storage: i === 0 ? level.startStorage : 0,
-      conveyor: [],
-      timer: 0,
-    }),
-  );
+  state.depot = newDepot(city.startStorage);
   const track = trackFor(levelIndex, 0);
-  // Mulai tepat setelah titik bongkar supaya urutan pertama: ambil di stasiun A → bongkar.
-  state.vehicles = [{ id: state.nextVehicleId++, level: 1, cargo: 0, distance: track.length * 0.03 }];
+  // Mulai tepat sebelum pickup sisi utara → langsung isi muatan lalu masuk jalan pertama.
+  const d = track.wrap(pickupDistance(levelIndex, 0, 0) - 0.6);
+  state.vehicles = [{ id: state.nextVehicleId++, level: 1, cargo: 0, distance: d }];
 }
 
 export function createRuntime(): Runtime {

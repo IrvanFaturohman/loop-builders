@@ -165,6 +165,7 @@ export function primGeometry(prim: Prim, ghost: boolean): THREE.BufferGeometry {
       g = stripToPN(new THREE.ConeGeometry(prim.radius, prim.h, prim.seg ?? 8, 1));
       g.translate(0, prim.h / 2, 0);
       if (!ghost) paint(g, prim.c);
+      rot = prim.r;
       break;
     }
   }

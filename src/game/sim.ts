@@ -1,12 +1,17 @@
 import { BALANCE } from '../config/balance';
-import { completedModuleCount, completedStageCount } from './building';
+import { completedModuleCount } from './building';
 import {
+  cityDef,
   cycleScale,
-  isSlotUnlocked,
+  isPlotComplete,
+  isPlotUnlocked,
   moneyPerUnit,
   pickupDistance,
+  plotDistance,
+  plotProject,
+  plotRent,
+  plotsOf,
   productionInterval,
-  projectOf,
   storageCapacity,
   trackOf,
   vehicleCapacity,
@@ -15,11 +20,11 @@ import type { EventSink } from './events';
 import { computeCrossings, type KeyPoint } from './track';
 import type { GameState, Runtime, Vehicle } from './types';
 
-type Key = { kind: 'unload' } | { kind: 'pickup'; slot: number };
+type Key = { kind: 'pickup'; bay: number } | { kind: 'plot'; plot: number };
 
 /**
  * Satu langkah simulasi. Dipanggil dengan dt kecil (sub-step, maks BALANCE.maxStepDt).
- * Urutan: boost → produksi/conveyor → gerak kendaraan (+ crossing).
+ * Urutan: boost → produksi/conveyor depot → gerak kendaraan (+ crossing).
  */
 export function step(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
   if (dt <= 0) return;
@@ -27,7 +32,7 @@ export function step(state: GameState, rt: Runtime, dt: number, events: EventSin
   if (state.completed) return;
   state.stats.levelTime += dt;
   state.stats.totalTime += dt;
-  updateStations(state, rt, dt, events);
+  updateDepot(state, rt, dt, events);
   if (rt.freeze > 0) {
     rt.freeze = Math.max(0, rt.freeze - dt);
     return;
@@ -80,56 +85,55 @@ function updateBoost(rt: Runtime, dt: number): void {
 }
 
 // ---------------------------------------------------------------------------
-// Produksi & conveyor
+// Depot: beberapa mesin + conveyor → satu penyimpanan
 // ---------------------------------------------------------------------------
 
+export function depotInTransit(state: GameState): number {
+  let n = 0;
+  for (let i = 0; i < state.depot.machines; i++) n += state.depot.lines[i].length;
+  return n;
+}
+
 /**
- * Aturan buffer conveyor:
- *  - Mesin hanya melahirkan item bila storage + item di conveyor < kapasitas penyimpanan.
- *    Artinya ruang penyimpanan "dipesan" sejak item lahir, sehingga item yang tiba di ujung
- *    conveyor SELALU muat dan tidak pernah hilang/menumpuk di luar batas.
+ * Aturan buffer conveyor (sama untuk semua jalur mesin):
+ *  - Mesin hanya melahirkan item bila stok + SEMUA item di conveyor < kapasitas penyimpanan.
+ *    Ruang dipesan sejak item lahir, sehingga item yang tiba selalu muat.
  *  - Item di conveyor belum bisa diambil kendaraan; baru masuk `storage` saat progress >= 1.
- *  - Saat penuh, timer mesin ditahan di satu interval (mesin berhenti, siap produksi lagi
- *    begitu kendaraan mengambil stok).
+ *  - Saat penuh, timer mesin ditahan di satu interval (berhenti, siap produksi lagi).
  */
-function updateStations(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
-  let fillSum = 0;
-  let fillCount = 0;
-  for (const st of state.stations) {
-    if (!st.built || !isSlotUnlocked(state, st.slot)) continue;
-    const cap = storageCapacity(st);
-    const interval = productionInterval(state, st);
-    const wasFull = st.storage + st.conveyor.length >= cap;
-
-    const adv = dt / BALANCE.conveyorTime;
-    for (let i = 0; i < st.conveyor.length; i++) st.conveyor[i] += adv;
-    while (st.conveyor.length > 0 && st.conveyor[0] >= 1) {
-      st.conveyor.shift();
-      st.storage++;
-      events.push({ type: 'stored', slot: st.slot });
+function updateDepot(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
+  const dep = state.depot;
+  const cap = storageCapacity(state);
+  const interval = productionInterval(state);
+  const wasFull = dep.storage + depotInTransit(state) >= cap;
+  const adv = dt / BALANCE.conveyorTime;
+  for (let m = 0; m < dep.machines; m++) {
+    const line = dep.lines[m];
+    for (let i = 0; i < line.length; i++) line[i] += adv;
+    while (line.length > 0 && line[0] >= 1) {
+      line.shift();
+      dep.storage++;
+      events.push({ type: 'stored' });
     }
-
-    if (st.storage + st.conveyor.length < cap) {
-      st.timer += dt;
-      while (st.timer >= interval && st.storage + st.conveyor.length < cap) {
-        st.timer -= interval;
-        st.conveyor.push(Math.min(0.99, st.timer / BALANCE.conveyorTime));
-        events.push({ type: 'produced', slot: st.slot });
+  }
+  let inTransit = depotInTransit(state);
+  for (let m = 0; m < dep.machines; m++) {
+    if (dep.storage + inTransit < cap) {
+      dep.timers[m] += dt;
+      while (dep.timers[m] >= interval && dep.storage + inTransit < cap) {
+        dep.timers[m] -= interval;
+        dep.lines[m].push(Math.min(0.99, dep.timers[m] / BALANCE.conveyorTime));
+        inTransit++;
+        events.push({ type: 'produced', line: m });
       }
-      if (st.storage + st.conveyor.length >= cap) st.timer = Math.min(st.timer, interval);
+      if (dep.storage + inTransit >= cap) dep.timers[m] = Math.min(dep.timers[m], interval);
     } else {
-      st.timer = Math.min(st.timer + dt, interval);
+      dep.timers[m] = Math.min(dep.timers[m] + dt, interval);
     }
-
-    const isFull = st.storage + st.conveyor.length >= cap;
-    if (isFull !== wasFull) events.push({ type: 'stationFull', slot: st.slot, full: isFull });
-    fillSum += st.storage / cap;
-    fillCount++;
   }
-  if (fillCount > 0) {
-    const avg = fillSum / fillCount;
-    rt.storageFill += (avg - rt.storageFill) * (1 - Math.exp(-dt / 3));
-  }
+  const isFull = dep.storage + inTransit >= cap;
+  if (isFull !== wasFull) events.push({ type: 'stationFull', full: isFull });
+  rt.storageFill += (dep.storage / cap - rt.storageFill) * (1 - Math.exp(-dt / 3));
 }
 
 // ---------------------------------------------------------------------------
@@ -137,11 +141,10 @@ function updateStations(state: GameState, rt: Runtime, dt: number, events: Event
 // ---------------------------------------------------------------------------
 
 export function keyPointsFor(state: GameState): KeyPoint<Key>[] {
-  const keys: KeyPoint<Key>[] = [{ d: 0, data: { kind: 'unload' } }];
-  for (const st of state.stations) {
-    if (st.built && isSlotUnlocked(state, st.slot)) {
-      keys.push({ d: pickupDistance(state.levelIndex, state.expandStage, st.slot), data: { kind: 'pickup', slot: st.slot } });
-    }
+  const keys: KeyPoint<Key>[] = [];
+  for (let bay = 0; bay < 4; bay++) keys.push({ d: pickupDistance(state.levelIndex, state.expandStage, bay), data: { kind: 'pickup', bay } });
+  for (let p = 0; p < state.plots.length; p++) {
+    if (isPlotUnlocked(state, p)) keys.push({ d: plotDistance(state.levelIndex, state.expandStage, p), data: { kind: 'plot', plot: p } });
   }
   return keys;
 }
@@ -153,8 +156,8 @@ function moveVehicles(state: GameState, rt: Runtime, dt: number, events: EventSi
   const n = state.vehicles.length;
   if (n === 0) return;
 
-  // Penyeimbang jarak: kendaraan dengan celah depan lebih besar dari rata-rata sedikit
-  // lebih cepat, yang terlalu dekat mengerem — tanpa fisika tabrakan.
+  // Penyeimbang jarak: celah depan lebih besar dari rata-rata → sedikit lebih cepat,
+  // terlalu dekat → mengerem. Tanpa fisika tabrakan.
   const gaps = new Map<number, number>();
   const sorted = [...state.vehicles].sort((a, b) => a.distance - b.distance);
   for (let i = 0; i < n; i++) {
@@ -173,96 +176,96 @@ function moveVehicles(state: GameState, rt: Runtime, dt: number, events: EventSi
       if (g < BALANCE.minVehicleGap) factor *= Math.max(0.25, g / BALANCE.minVehicleGap);
     }
     const move = Math.min(base * factor, L * 0.5);
-    const crossings = computeCrossings(v.distance, move, L, keys);
-    for (const c of crossings) {
-      if (c.data.kind === 'unload') unload(state, rt, v, events);
-      else pickup(state, v, c.data.slot, events);
+    for (const c of computeCrossings(v.distance, move, L, keys)) {
+      if (c.data.kind === 'pickup') pickup(state, rt, v, c.data.bay, events);
+      else passPlot(state, v, c.data.plot, events);
       if (state.completed) return;
     }
     v.distance = track.wrap(v.distance + move);
   }
 }
 
-/** Pickup nyata: jumlahDiambil = min(stokPenyimpanan, kapasitas − muatan). */
-export function pickup(state: GameState, v: Vehicle, slot: number, events: EventSink): number {
-  const st = state.stations[slot];
-  if (!st || !st.built) return 0;
+/** Pickup nyata di teluk depot: jumlahDiambil = min(stok, kapasitas − muatan). */
+export function pickup(state: GameState, rt: Runtime | null, v: Vehicle, bay: number, events: EventSink): number {
   const space = vehicleCapacity(v.level) - v.cargo;
   if (space <= 0) {
-    events.push({ type: 'pickupMiss', vehicleId: v.id, slot, reason: 'full' });
+    events.push({ type: 'pickupMiss', vehicleId: v.id, bay, reason: 'full' });
     return 0;
   }
-  const take = Math.min(st.storage, space);
+  const take = Math.min(state.depot.storage, space);
   if (take <= 0) {
-    events.push({ type: 'pickupMiss', vehicleId: v.id, slot, reason: 'empty' });
+    events.push({ type: 'pickupMiss', vehicleId: v.id, bay, reason: 'empty' });
+    if (rt) pushLoad(rt, v.cargo / vehicleCapacity(v.level));
     return 0;
   }
-  st.storage -= take;
+  state.depot.storage -= take;
   v.cargo += take;
-  events.push({ type: 'pickup', vehicleId: v.id, slot, amount: take, cargo: v.cargo });
+  if (rt) pushLoad(rt, v.cargo / vehicleCapacity(v.level));
+  events.push({ type: 'pickup', vehicleId: v.id, bay, amount: take, cargo: v.cargo });
   return take;
 }
 
 /**
- * Bongkar: SELURUH muatan langsung masuk progres bangunan dalam satu langkah logika
- * (tanpa timer pemasangan). Material melewati target tetap dibayar sebagai uang
- * (aturan eksplisit "kelebihan dijual"), tidak dibuang diam-diam.
+ * Truk melintasi kavling:
+ *  - bangunan belum jadi + truk bermuatan → turunkan sebanyak yang masih dibutuhkan
+ *    (isi-dulu: sisa muatan lanjut ke kavling berikutnya), modul terkait langsung solid;
+ *  - bangunan sudah jadi → bayar sewa (reward line), berapa pun muatannya.
  */
-export function unload(state: GameState, rt: Runtime | null, v: Vehicle, events: EventSink): void {
-  const amount = v.cargo;
-  if (amount <= 0) {
-    events.push({ type: 'unloadEmpty', vehicleId: v.id });
-    if (rt) pushLoad(rt, 0);
+export function passPlot(state: GameState, v: Vehicle, plot: number, events: EventSink): void {
+  if (isPlotComplete(state, plot)) {
+    const amount = plotRent(state, plot);
+    state.money += amount;
+    state.stats.totalRent += amount;
+    events.push({ type: 'rent', vehicleId: v.id, plot, amount });
     return;
   }
-  const project = projectOf(state);
-  const before = state.delivered;
-  const used = Math.min(amount, project.target - before);
-  state.delivered = before + used;
-  v.cargo = 0;
-  const money = amount * moneyPerUnit(state);
+  if (v.cargo <= 0) return;
+  const project = plotProject(state, plot);
+  const have = state.plots[plot];
+  const drop = Math.min(v.cargo, project.target - have);
+  v.cargo -= drop;
+  state.plots[plot] = have + drop;
+  const money = drop * moneyPerUnit(state);
   state.money += money;
-  state.stats.totalDelivered += used;
-  if (rt) pushLoad(rt, amount / vehicleCapacity(v.level));
+  state.stats.totalDelivered += drop;
   events.push({
-    type: 'unload',
+    type: 'deliver',
     vehicleId: v.id,
-    amount,
-    used,
+    plot,
+    amount: drop,
     money,
-    fromModule: completedModuleCount(project, before),
-    toModule: completedModuleCount(project, state.delivered),
+    fromModule: completedModuleCount(project, have),
+    toModule: completedModuleCount(project, have + drop),
   });
-
-  const stagesDone = completedStageCount(project, state.delivered);
-  const lastStage = project.stageNames.length - 1;
-  while (state.stagesPaid < stagesDone) {
-    const s = state.stagesPaid;
-    if (s < lastStage) {
-      const bonus = Math.round((project.stageBonus[s] ?? 0) * cycleScale(state));
-      state.money += bonus;
-      events.push({ type: 'stageComplete', stage: s, bonus });
-    }
-    state.stagesPaid++;
+  if (state.plots[plot] >= project.target) {
+    events.push({ type: 'plotComplete', plot });
+    checkStreet(state, plotsOf(state.levelIndex)[plot].street, events);
+    if (state.plots.every((_, i) => isPlotComplete(state, i))) completeCity(state, events);
   }
-  if (state.delivered >= project.target) completeProject(state, events);
 }
 
-function completeProject(state: GameState, events: EventSink): void {
-  const project = projectOf(state);
+function checkStreet(state: GameState, street: number, events: EventSink): void {
+  if (state.streetsPaid[street]) return;
+  const plots = plotsOf(state.levelIndex).filter((p) => p.street === street);
+  if (!plots.every((p) => isPlotComplete(state, p.index))) return;
+  state.streetsPaid[street] = true;
+  const bonus = Math.round((cityDef(state).streetBonus[street] ?? 0) * cycleScale(state));
+  state.money += bonus;
+  events.push({ type: 'streetComplete', street, bonus });
+}
+
+function completeCity(state: GameState, events: EventSink): void {
   state.completed = true;
-  const bonus = Math.round(project.completionBonus * cycleScale(state));
+  const bonus = Math.round(cityDef(state).completionBonus * cycleScale(state));
   // Sisa material di kendaraan, penyimpanan & conveyor dijual (tidak dibuang diam-diam).
   let units = 0;
   for (const v of state.vehicles) {
     units += v.cargo;
     v.cargo = 0;
   }
-  for (const st of state.stations) {
-    units += st.storage + st.conveyor.length;
-    st.storage = 0;
-    st.conveyor = [];
-  }
+  units += state.depot.storage + depotInTransit(state);
+  state.depot.storage = 0;
+  state.depot.lines = state.depot.lines.map(() => []);
   const leftover = units * moneyPerUnit(state);
   state.money += bonus + leftover;
   state.stats.lastCompletionBonus = bonus;
@@ -272,5 +275,5 @@ function completeProject(state: GameState, events: EventSink): void {
 
 function pushLoad(rt: Runtime, ratio: number): void {
   rt.recentLoads.push(ratio);
-  if (rt.recentLoads.length > 8) rt.recentLoads.shift();
+  if (rt.recentLoads.length > 12) rt.recentLoads.shift();
 }

@@ -79,7 +79,7 @@ function roadTexture(p: ThemePalette): THREE.CanvasTexture {
   return t;
 }
 
-function dropTexture(): THREE.CanvasTexture {
+export function dropTexture(): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 128;
   c.height = 128;
@@ -127,6 +127,7 @@ export class TrackView {
     readonly palette: ThemePalette,
     track: TrackPath,
     private exclusions: Vec2[],
+    opts: { gate?: boolean } = {},
   ) {
     this.track = track;
     this.roadTex = roadTexture(palette);
@@ -161,8 +162,11 @@ export class TrackView {
     this.dropZone = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2 * 0.9, 0.9), new THREE.MeshBasicMaterial({ map: dropTexture(), transparent: true }));
     this.dropZone.rotation.x = -Math.PI / 2;
 
-    this.group.add(this.road, this.curbs, this.chevrons, this.bushes, this.gate);
-    this.buildGate();
+    this.group.add(this.road, this.curbs, this.chevrons, this.bushes);
+    if (opts.gate ?? true) {
+      this.group.add(this.gate);
+      this.buildGate();
+    }
     this.rebuildBushList();
     this.resample();
     this.writeGeometry();
@@ -433,7 +437,7 @@ export class TrackView {
     const o = { x: 0, z: 0 };
     for (let k = 0; k < n && this.bushDs.length < MAX_BUSHES; k++) {
       const d = (k + 0.5) * (L / n);
-      if (d < 1.3 || d > L - 1.3) continue; // area gerbang bongkar
+      if (d < 0.6 || d > L - 0.6) continue;
       this.track.pointAt(d, tmp);
       this.track.outwardAt(d, o);
       const bx = tmp.x + o.x * 1.3;
