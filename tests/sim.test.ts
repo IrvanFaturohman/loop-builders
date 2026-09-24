@@ -1,144 +1,120 @@
 import { describe, expect, it } from 'vitest';
 import { BALANCE } from '../src/config/balance';
 import { completedModuleCount } from '../src/game/building';
-import { isPlotComplete, plotDistance, plotProject, plotRent, plotTarget, plotsOf, storageCapacity, trackOf, vehicleCapacity } from '../src/game/economy';
+import { capacity, cargoTotal, isPlotComplete, isPlotReady, plotProject, plotRent, plotTarget, plotsOf, trackOf } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
-import { boostHold, passPlot, pickup, step } from '../src/game/sim';
+import { boostHold, passPlot, sell, step, wagonDistance } from '../src/game/sim';
+import { fieldFor } from '../src/game/worldgen';
 import { count, fresh, run } from './helpers';
 
-describe('pickup di depot', () => {
-  it('mengambil min(stok, kapasitas − muatan); kendaraan penuh lewat saja', () => {
-    const { state, rt } = fresh();
-    const v = state.vehicles[0];
-    state.depot.storage = 3;
-    const ev: GameEvent[] = [];
-    expect(pickup(state, rt, v, 0, ev)).toBe(3);
-    expect(v.cargo).toBe(3);
-    state.depot.storage = 10;
-    expect(pickup(state, rt, v, 1, ev)).toBe(1);
-    expect(v.cargo).toBe(vehicleCapacity(1));
-    expect(pickup(state, rt, v, 2, ev)).toBe(0);
-    expect(state.depot.storage).toBe(9);
-    expect(ev.at(-1)).toMatchObject({ type: 'pickupMiss', reason: 'full' });
-  });
+/** Bersihkan lahan kavling (simulasikan sudah ditebang). */
+function clearPlot(state: ReturnType<typeof fresh>['state'], plot: number) {
+  for (const c of fieldFor(state.levelIndex).plotCells[plot]) state.blocks[c] = 0;
+}
 
-  it('item yang masih di conveyor tidak bisa diambil', () => {
+describe('gergaji', () => {
+  it('menebang blok di dekat rel; hasil masuk muatan, blok jauh tidak tersentuh', () => {
     const { state, rt } = fresh();
-    state.depot.storage = 0;
-    state.depot.lines[0] = [0.99, 0.5];
-    const ev: GameEvent[] = [];
-    expect(pickup(state, rt, state.vehicles[0], 0, ev)).toBe(0);
-    expect(state.depot.lines[0].length).toBe(2);
-  });
-});
-
-describe('produksi depot', () => {
-  it('beberapa mesin berbagi kapasitas; berhenti saat penuh tanpa kehilangan item', () => {
-    const { state, rt } = fresh();
-    state.vehicles = [];
-    state.depot.storage = 0;
-    state.depot.machines = 3;
-    const cap = storageCapacity(state);
-    const ev = run(state, rt, 40);
-    expect(state.depot.storage).toBe(cap);
-    expect(state.depot.lines.flat().length).toBe(0);
-    expect(count(ev, 'produced')).toBe(cap);
-    expect(count(ev, 'stored')).toBe(cap);
-  });
-
-  it('invarian stok + conveyor <= kapasitas & muatan <= kapasitas selama bermain', () => {
-    const { state, rt } = fresh();
-    state.money = 999;
-    for (let i = 0; i < 3000; i++) {
-      step(state, rt, 1 / 30, []);
-      const inTransit = state.depot.lines.flat().length;
-      expect(state.depot.storage + inTransit).toBeLessThanOrEqual(storageCapacity(state));
-      for (const v of state.vehicles) expect(v.cargo).toBeLessThanOrEqual(vehicleCapacity(v.level));
+    const before = [...state.blocks];
+    const ev = run(state, rt, 3);
+    expect(count(ev, 'cut')).toBeGreaterThan(0);
+    expect(cargoTotal(state.train.cargo)).toBeGreaterThan(0);
+    const f = fieldFor(0);
+    const t = trackOf(state);
+    for (let c = 0; c < f.n; c++) {
+      if (state.blocks[c] !== before[c]) {
+        expect(t.closestDistance({ x: f.x[c], z: f.z[c] }).gap).toBeLessThan(BALANCE.saw.reach + 0.05);
+      }
     }
   });
+
+  it('muatan tidak pernah melebihi kapasitas; saat penuh gergaji berhenti', () => {
+    const { state, rt } = fresh();
+    for (let i = 0; i < 1500; i++) {
+      step(state, rt, 1 / 30, []);
+      expect(cargoTotal(state.train.cargo)).toBeLessThanOrEqual(capacity(state));
+    }
+    state.train.cargo = { wood: capacity(state), stone: 0, gem: 0 };
+    const snap = [...state.blocks];
+    step(state, rt, 1 / 30, []);
+    expect(state.blocks).toEqual(snap);
+  });
+
+  it('gerbong berbaris di belakang lokomotif', () => {
+    const { state } = fresh();
+    state.train.wagons = [2, 1, 1];
+    const L = trackOf(state).length;
+    const gap = (wagonDistance(state, 0) - wagonDistance(state, 1) + L) % L;
+    expect(gap).toBeCloseTo(BALANCE.wagonSpacing, 5);
+  });
 });
 
-describe('kavling: kirim bahan & sewa', () => {
-  it('isi-dulu: turunkan sebanyak kebutuhan, sisa lanjut ke kavling berikutnya', () => {
+describe('stasiun & kavling', () => {
+  it('stasiun menjual seluruh muatan', () => {
     const { state } = fresh();
-    const v = state.vehicles[0];
-    v.level = 2;
-    v.cargo = 10;
+    state.train.cargo = { wood: 5, stone: 2, gem: 1 };
+    const ev: GameEvent[] = [];
+    expect(sell(state, ev)).toBe(5 * 1 + 2 * 2 + 1 * 10);
+    expect(cargoTotal(state.train.cargo)).toBe(0);
+  });
+
+  it('kavling tertutup hutan tidak menerima bahan; setelah bersih diisi (isi-dulu)', () => {
+    const { state } = fresh();
+    state.train.cargo = { wood: 10, stone: 0, gem: 0 };
+    const ev: GameEvent[] = [];
+    passPlot(state, 0, ev);
+    expect(state.plots[0]).toBe(0);
+    expect(isPlotReady(state, 0)).toBe(false);
+    clearPlot(state, 0);
+    clearPlot(state, 1);
     const need = plotTarget(state, 0);
     state.plots[0] = need - 3;
-    const ev: GameEvent[] = [];
-    passPlot(state, v, 0, ev);
+    passPlot(state, 0, ev);
     expect(state.plots[0]).toBe(need);
-    expect(v.cargo).toBe(7);
-    expect(ev.some((e) => e.type === 'plotComplete' && e.plot === 0)).toBe(true);
-    passPlot(state, v, 1, ev);
+    expect(state.train.cargo.wood).toBe(7);
+    expect(ev.some((e) => e.type === 'plotComplete')).toBe(true);
+    passPlot(state, 1, ev);
     expect(state.plots[1]).toBe(7);
-    expect(v.cargo).toBe(0);
     const d = ev.find((e) => e.type === 'deliver' && e.plot === 1);
-    expect(d).toMatchObject({ amount: 7, fromModule: 0 });
     if (d?.type === 'deliver') expect(d.toModule).toBe(completedModuleCount(plotProject(state, 1), 7));
   });
 
-  it('bangunan jadi membayar sewa tiap kali truk lewat; truk kosong tidak berbuat apa-apa di kavling belum jadi', () => {
+  it('bangunan jadi membayar sewa tiap kereta lewat', () => {
     const { state } = fresh();
-    const v = state.vehicles[0];
+    clearPlot(state, 0);
     state.plots[0] = plotTarget(state, 0);
     const before = state.money;
     const ev: GameEvent[] = [];
-    passPlot(state, v, 0, ev);
-    passPlot(state, v, 0, ev);
+    passPlot(state, 0, ev);
+    passPlot(state, 0, ev);
     expect(state.money - before).toBe(plotRent(state, 0) * 2);
-    v.cargo = 0;
-    passPlot(state, v, 1, ev);
-    expect(state.plots[1]).toBe(0);
-    expect(count(ev, 'rent')).toBe(2);
   });
 
-  it('bonus jalan dibayar sekali saat semua kavling jalan itu selesai', () => {
+  it('bonus jalur sekali; level selesai saat semua bangunan berdiri, sisa muatan dijual', () => {
     const { state } = fresh();
-    const v = state.vehicles[0];
-    const street0 = plotsOf(0).filter((p) => p.street === 0);
-    for (const p of street0.slice(1)) state.plots[p.index] = plotTarget(state, p.index);
-    v.level = 6;
-    v.cargo = 100;
-    const ev: GameEvent[] = [];
-    passPlot(state, v, street0[0].index, ev);
-    passPlot(state, v, street0[0].index, ev);
-    expect(count(ev, 'streetComplete')).toBe(1);
-    expect(state.streetsPaid[0]).toBe(true);
-  });
-
-  it('kota selesai saat semua kavling jadi; sisa material dijual', () => {
-    const { state } = fresh();
-    for (let i = 1; i < state.plots.length; i++) state.plots[i] = plotTarget(state, i);
     state.expandStage = 3;
-    const v = state.vehicles[0];
-    v.level = 6;
-    v.cargo = plotTarget(state, 0) + 5;
-    state.depot.storage = 4;
+    for (let i = 0; i < state.plots.length; i++) {
+      clearPlot(state, i);
+      state.plots[i] = plotTarget(state, i);
+    }
+    state.plots[0] -= 2;
+    state.train.cargo = { wood: 5, stone: 0, gem: 1 };
     const ev: GameEvent[] = [];
-    passPlot(state, v, 0, ev);
+    passPlot(state, 0, ev);
     expect(state.completed).toBe(true);
-    expect(ev.find((e) => e.type === 'projectComplete')).toMatchObject({ leftover: 9 });
+    expect(count(ev, 'streetComplete')).toBe(1);
+    expect(ev.find((e) => e.type === 'projectComplete')).toMatchObject({ leftover: 3 + 10 });
     expect(state.plots.every((_, i) => isPlotComplete(state, i))).toBe(true);
   });
 });
 
 describe('putaran nyata', () => {
-  it('beberapa detik pertama: ambil di depot, kirim ke rumah pertama, modul jadi solid', () => {
-    const { state, rt } = fresh();
-    const ev = run(state, rt, 6);
-    const p = ev.findIndex((e) => e.type === 'pickup');
-    const d = ev.findIndex((e) => e.type === 'deliver');
-    expect(p).toBeGreaterThanOrEqual(0);
-    expect(d).toBeGreaterThan(p);
-    expect(completedModuleCount(plotProject(state, 0), state.plots[0])).toBeGreaterThan(0);
-  });
-
-  it('satu putaran = tepat satu lintasan per titik kunci, dengan atau tanpa boost', () => {
+  it('stasiun & kavling terpicu tepat sekali per putaran, dengan atau tanpa boost', () => {
     for (const boost of [false, true]) {
       const { state, rt } = fresh();
-      state.plots[0] = plotTarget(state, 0); // jadi → sewa setiap lewat
+      const street0 = plotsOf(0).filter((p) => p.street === 0);
+      clearPlot(state, street0[0].index);
+      state.plots[street0[0].index] = plotTarget(state, street0[0].index);
       if (boost) {
         boostHold(rt, true);
         rt.boost.mult = BALANCE.boost.mult;
@@ -146,17 +122,52 @@ describe('putaran nyata', () => {
       const L = trackOf(state).length;
       const ev: GameEvent[] = [];
       let travelled = 0;
-      let prev = state.vehicles[0].distance;
+      let prev = state.train.distance;
       while (travelled < L * 3) {
+        state.train.cargo = { wood: 0, stone: 0, gem: 1 }; // permata selalu dijual
         step(state, rt, boost ? 1 / 30 : 1 / 120, ev);
         rt.boost.energy = 1;
-        const cur = state.vehicles[0].distance;
+        const cur = state.train.distance;
         travelled += (cur - prev + L) % L;
         prev = cur;
       }
-      expect(ev.filter((e) => e.type === 'rent' && e.plot === 0).length).toBe(3);
-      expect(ev.filter((e) => (e.type === 'pickup' || e.type === 'pickupMiss') && e.bay === 2).length).toBe(3);
-      expect(plotDistance(0, 0, 0)).toBeGreaterThan(0);
+      expect(ev.filter((e) => e.type === 'rent').length).toBe(3);
+      expect(ev.filter((e) => e.type === 'sell').length).toBe(3);
     }
+  });
+
+  it('lahan kavling pertama akhirnya bersih oleh gergaji lalu siap dibangun', () => {
+    const { state, rt } = fresh();
+    state.train.wagons = [3, 3];
+    state.capacityLevel = 10;
+    const ev = run(state, rt, 90);
+    expect(ev.some((e) => e.type === 'plotReady')).toBe(true);
+    expect(plotsOf(0).filter((p) => p.street === 0).some((p) => isPlotReady(state, p.index))).toBe(true);
+  });
+});
+
+describe('hutan tumbuh kembali', () => {
+  it('tunggul tumbuh lagi jadi pohon penuh (kecuali lahan kavling), jadi pasokan tidak habis', async () => {
+    const { regrow } = await import('../src/game/sim');
+    const { state } = fresh();
+    const f = fieldFor(0);
+    const tree = [...Array(f.n).keys()].find((c) => f.kind[c] === 0 && f.plotOf[c] < 0 && state.blocks[c] > 0)!;
+    const lot = f.plotCells[0][0];
+    state.blocks[tree] = 0;
+    state.blocks[lot] = 0;
+    regrow(state, BALANCE.blocks.tree.regrow + 0.1);
+    expect(state.blocks[tree]).toBe(BALANCE.blocks.tree.hp);
+    expect(state.blocks[lot]).toBe(0);
+  });
+
+  it('stasiun menyimpan kayu yang masih dibutuhkan kavling bersih, sisanya dijual', () => {
+    const { state } = fresh();
+    for (const c of fieldFor(0).plotCells[0]) state.blocks[c] = 0;
+    const need = plotTarget(state, 0);
+    state.train.cargo = { wood: need + 5, stone: 0, gem: 1 };
+    const ev: GameEvent[] = [];
+    const money = sell(state, ev);
+    expect(state.train.cargo.wood).toBe(need);
+    expect(money).toBe(5 + 10);
   });
 });

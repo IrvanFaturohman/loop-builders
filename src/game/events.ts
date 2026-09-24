@@ -1,29 +1,27 @@
+import type { Cargo, Resource } from './types';
+
 /** Event yang dipancarkan simulasi/aksi agar render, audio, dan UI bisa bereaksi. */
 export type GameEvent =
-  | { type: 'produced'; line: number }
-  | { type: 'stored' }
-  | { type: 'stationFull'; full: boolean }
-  | { type: 'pickup'; vehicleId: number; bay: number; amount: number; cargo: number }
-  | { type: 'pickupMiss'; vehicleId: number; bay: number; reason: 'empty' | 'full' }
+  | { type: 'cut'; cell: number; wagon: number; res: Resource | null; amount: number; money: number }
+  | { type: 'plotReady'; plot: number }
   | {
       type: 'deliver';
-      vehicleId: number;
       plot: number;
       amount: number;
-      money: number;
       /** Modul [fromModule, toModule) berubah ghost → solid. */
       fromModule: number;
       toModule: number;
     }
   | { type: 'plotComplete'; plot: number }
-  | { type: 'rent'; vehicleId: number; plot: number; amount: number }
+  | { type: 'rent'; plot: number; amount: number }
+  | { type: 'sell'; money: number; cargo: Cargo; kept: number }
   | { type: 'streetComplete'; street: number; bonus: number }
   | { type: 'projectComplete'; bonus: number; leftover: number }
-  | { type: 'add'; vehicleId: number }
-  | { type: 'merge'; keepId: number; removedId: number; level: number; overflowMoney: number }
-  | { type: 'expand'; from: number; to: number }
-  | { type: 'machine'; line: number }
-  | { type: 'upgrade'; level: number }
+  | { type: 'add'; index: number }
+  | { type: 'merge'; a: number; b: number; level: number }
+  | { type: 'speed'; level: number }
+  | { type: 'capacity'; level: number }
+  | { type: 'expand'; from: number; to: number; cleared: number[] }
   | { type: 'nextProject'; levelIndex: number };
 
 export type EventSink = GameEvent[];

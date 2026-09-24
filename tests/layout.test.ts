@@ -1,83 +1,84 @@
 import { describe, expect, it } from 'vitest';
 import { getBuilding } from '../src/config/buildings';
-import { CITIES } from '../src/config/cities';
+import { LEVELS } from '../src/config/levels';
 import { completedModuleCount } from '../src/game/building';
-import { pickupDistance, plotDistance, plotsOf, trackFor } from '../src/game/economy';
-import { LOT_D, LOT_W, pickupPoints, stageCount } from '../src/game/layout';
+import { plotDistance, plotsOf, trackFor } from '../src/game/economy';
+import { LOT_D, LOT_W, stageCount } from '../src/game/layout';
+import { fieldFor, initialBlocks } from '../src/game/worldgen';
 
-/** Kotak kavling (sumbu-sejajar karena semua jalan lurus sejajar sumbu). */
 function lotRect(p: ReturnType<typeof plotsOf>[number]) {
-  const alongX = Math.abs(p.facing.z) > 0.5; // menghadap ±z → lebar kavling di sumbu x
+  const alongX = Math.abs(p.facing.z) > 0.5;
   const hx = (alongX ? LOT_W : LOT_D) / 2;
   const hz = (alongX ? LOT_D : LOT_W) / 2;
   return { minX: p.pos.x - hx, maxX: p.pos.x + hx, minZ: p.pos.z - hz, maxZ: p.pos.z + hz };
 }
 
-describe('tata letak kota', () => {
-  CITIES.forEach((city, ci) => {
-    it(`${city.id}: loop tertutup valid & makin panjang tiap jalan baru`, () => {
+describe('tata letak & hutan', () => {
+  LEVELS.forEach((level, li) => {
+    it(`${level.id}: loop valid & makin panjang tiap rel baru`, () => {
       let prev = 0;
-      for (let s = 0; s < stageCount(city); s++) {
-        const t = trackFor(ci, s);
+      for (let s = 0; s < stageCount(level); s++) {
+        const t = trackFor(li, s);
         expect(t.clockwise).toBe(true);
         expect(t.length).toBeGreaterThan(prev + 5);
         prev = t.length;
       }
     });
 
-    it(`${city.id}: kavling tidak menimpa jalan maupun kavling lain`, () => {
-      const plots = plotsOf(ci);
-      const full = trackFor(ci, stageCount(city) - 1);
+    it(`${level.id}: kavling tidak menimpa rel maupun kavling lain`, () => {
+      const plots = plotsOf(li);
+      const full = trackFor(li, stageCount(level) - 1);
       const lots = plots.map(lotRect);
-      // jalan (garis tengah + setengah lebar jalan & kerb) tidak masuk kavling
-      const margin = 0.8;
       const pt = { x: 0, z: 0 };
       for (let d = 0; d < full.length; d += 0.1) {
         full.pointAt(d, pt);
-        for (const r of lots) {
-          const inside = pt.x > r.minX - margin && pt.x < r.maxX + margin && pt.z > r.minZ - margin && pt.z < r.maxZ + margin;
-          expect(inside).toBe(false);
-        }
+        for (const r of lots) expect(pt.x > r.minX - 0.7 && pt.x < r.maxX + 0.7 && pt.z > r.minZ - 0.7 && pt.z < r.maxZ + 0.7).toBe(false);
       }
-      for (let i = 0; i < lots.length; i++) {
+      for (let i = 0; i < lots.length; i++)
         for (let j = i + 1; j < lots.length; j++) {
           const a = lots[i];
           const b = lots[j];
-          const overlap = a.minX < b.maxX && b.minX < a.maxX && a.minZ < b.maxZ && b.minZ < a.maxZ;
-          expect(overlap, `kavling ${i} & ${j}`).toBe(false);
+          expect(a.minX < b.maxX && b.minX < a.maxX && a.minZ < b.maxZ && b.minZ < a.maxZ, `kavling ${i} & ${j}`).toBe(false);
         }
-      }
     });
 
-    it(`${city.id}: titik jangkar kavling & pickup tepat di lintasan, urut sesuai arah truk`, () => {
-      for (let s = 0; s < stageCount(city); s++) {
-        const t = trackFor(ci, s);
-        for (const p of pickupPoints(city)) expect(t.closestDistance(p).gap).toBeLessThan(0.45);
-        const open = plotsOf(ci).filter((p) => city.streets[p.street].unlockStage <= s);
+    it(`${level.id}: jangkar kavling di rel & urut sesuai arah kereta`, () => {
+      for (let s = 0; s < stageCount(level); s++) {
+        const t = trackFor(li, s);
+        const open = plotsOf(li).filter((p) => level.streets[p.street].unlockStage <= s);
         for (const p of open) expect(t.closestDistance(p.anchor).gap).toBeLessThan(0.02);
-        // urutan dalam satu jalan: berangkat → ujung → pulang, dan pickup sisi jalan itu di depannya
         for (const si of new Set(open.map((p) => p.street))) {
-          const ds = open.filter((p) => p.street === si).map((p) => plotDistance(ci, s, p.index));
-          const side = ['N', 'E', 'S', 'W'].indexOf(city.streets[si].side);
-          const pd = pickupDistance(ci, s, side);
-          const rel = ds.map((d) => (d - pd + t.length) % t.length);
-          for (let k = 1; k < rel.length; k++) expect(rel[k]).toBeGreaterThan(rel[k - 1]);
+          const ds = open.filter((p) => p.street === si).map((p) => plotDistance(li, s, p.index));
+          for (let k = 1; k < ds.length; k++) expect(ds[k]).toBeGreaterThan(ds[k - 1]);
         }
       }
     });
 
-    it(`${city.id}: bangunan pertama langsung tumbuh dari kiriman kecil`, () => {
-      for (const p of plotsOf(ci)) {
+    it(`${level.id}: hutan menutupi kavling, rel tahap 0 & lapangan stasiun bersih`, () => {
+      const f = fieldFor(li);
+      const hp = initialBlocks(li);
+      for (const cells of f.plotCells) {
+        expect(cells.length).toBeGreaterThanOrEqual(2);
+        for (const c of cells) expect(hp[c]).toBeGreaterThan(0);
+      }
+      const t = trackFor(li, 0);
+      const p = { x: 0, z: 0 };
+      for (let d = 0; d < t.length; d += 0.3) {
+        t.pointAt(d, p);
+        const i = Math.floor(p.x + f.half);
+        const j = Math.floor(p.z + f.half);
+        expect(hp[j * f.cols + i]).toBe(-1);
+      }
+      const center = Math.floor(f.half) * f.cols + Math.floor(f.half);
+      expect(hp[center]).toBe(-1);
+    });
+
+    it(`${level.id}: bangunan langsung tumbuh dari kiriman kecil`, () => {
+      for (const p of plotsOf(li)) {
         const proj = getBuilding(p.def.building, p.def.variant, p.def.target);
         expect(proj.costs.reduce((a, b) => a + b, 0)).toBe(proj.target);
-        expect(proj.modules.length).toBeGreaterThan(8);
         expect(completedModuleCount(proj, 4)).toBeGreaterThanOrEqual(1);
-        expect(proj.material).toBe(city.material);
       }
     });
-  });
-
-  it('material bata hanya di kota, kayu tidak di kota', () => {
-    for (const c of CITIES) expect(c.material === 'brick').toBe(c.theme === 'city');
   });
 });

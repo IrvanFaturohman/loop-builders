@@ -1,55 +1,60 @@
+import type { BlockKind, Resource } from '../game/types';
+
 /**
  * Angka balancing global. Ubah di sini untuk menyetel rasa permainan;
- * angka per kota (target bangunan, sewa, biaya jalan/mesin) ada di cities.ts.
+ * angka per level (target bangunan, sewa, biaya rel, zona hutan) ada di levels.ts.
  */
 export const BALANCE = {
-  /** Kapasitas per tingkat kendaraan (Lv1..Lv6). 2×cap(n) <= cap(n+1) supaya merge tidak overflow. */
-  vehicleCapacity: [4, 10, 24, 55, 120, 260],
-  /** Kecepatan dasar kendaraan (unit dunia per detik). */
-  vehicleSpeed: 5.0,
-  /** Jarak minimum antar kendaraan (visual) sebelum yang di belakang mengerem. */
-  minVehicleGap: 1.25,
-  /** Kekuatan penyeimbang jarak antar kendaraan (0 = mati). */
-  spacingGain: 0.14,
-  /** Panjang lintasan per kendaraan maksimum (batas jumlah kendaraan). */
-  lengthPerVehicle: 3.4,
+  /** Kecepatan dasar kereta (unit dunia per detik) & kenaikan per level Kecepatan. */
+  speed: { base: 3.4, perLevel: 0.1, maxLevel: 20 },
+  /** Kapasitas muatan dasar & pengali per level Kapasitas. */
+  capacity: { base: 20, growth: 1.3, maxLevel: 20 },
+  /** Kerusakan gergaji per detik gerbong Lv1 & pengali per level (hasil merge); jangkauan melebar tiap level. */
+  saw: { dps: 2.6, growth: 1.8, reach: 2.65, reachPerLevel: 0.22 },
+  /** Jarak antar gerbong di rel. */
+  wagonSpacing: 1.05,
+  maxWagons: 12,
+  maxWagonLevel: 8,
 
   boost: {
-    /** Pengali kecepatan saat boost (+70%). */
     mult: 1.7,
-    /** Lama boost dari satu ketukan (detik). */
     tapDuration: 0.65,
-    /** Energi penuh cukup untuk berapa detik boost terus-menerus (batas hold). */
     maxHoldSeconds: 7,
-    /** Detik untuk mengisi energi dari 0 ke penuh. */
     rechargeSeconds: 4.5,
-    /** Jeda sebelum energi mulai terisi lagi. */
     rechargeDelay: 0.5,
-    /** Setelah habis, boost aktif lagi saat energi >= nilai ini. */
     resumeAt: 0.3,
     accel: 10,
     decel: 3.2,
   },
 
-  add: { base: 10, growth: 1.45 },
-  /** Upgrade produksi depot (berlaku ke semua mesin). */
-  upgrade: { base: 16, growth: 1.7, maxLevel: 12 },
-  /** Setiap Produksi Lv. menambah throughput tiap mesin sebesar faktor ini (+40%). */
-  productionGrowth: 1.4,
-  /** Kapasitas penyimpanan depot: dasar + per level + per mesin tambahan. */
-  storage: { base: 12, perLevel: 4, perMachine: 6 },
-  maxMachines: 4,
-  /** Waktu item menempuh conveyor (detik). */
-  conveyorTime: 0.9,
+  cost: {
+    add: { base: 10, growth: 1.55 },
+    merge: { base: 15, growth: 1.45 },
+    speed: { base: 20, growth: 1.6 },
+    capacity: { base: 20, growth: 1.6 },
+  },
 
-  /** Pengali biaya, target & sewa tiap putaran ulang daftar kota. */
+  /** Harga jual per unit muatan di stasiun. */
+  price: { wood: 1, stone: 2, gem: 10 } as Record<Resource, number>,
+
+  /**
+   * Blok hutan: HP, hasil tebang, uang langsung (tumpukan koin), dan waktu tumbuh kembali
+   * (detik; 0 = tidak tumbuh lagi). Hutan yang tumbuh kembali membuat kereta selalu punya
+   * sesuatu untuk ditebang — pasokan bahan tidak pernah habis (tidak ada softlock).
+   */
+  blocks: {
+    tree: { hp: 2, res: 'wood', amount: 2, regrow: 30 },
+    treeGold: { hp: 4, res: 'wood', amount: 3, regrow: 40 },
+    treeRed: { hp: 7, res: 'wood', amount: 5, regrow: 55 },
+    rock: { hp: 6, res: 'stone', amount: 3, regrow: 45 },
+    crystal: { hp: 12, res: 'gem', amount: 1, regrow: 90 },
+    coins: { hp: 1, res: null, amount: 0, money: 20, regrow: 0 },
+  } as Record<BlockKind, { hp: number; res: Resource | null; amount: number; money?: number; regrow: number }>,
+
+  /** Pengali biaya, target, harga & sewa tiap putaran ulang daftar level. */
   cycleScale: 0.6,
-  /** Durasi pembekuan kendaraan selama animasi jalan baru (detik). */
   expandFreeze: 1.35,
-  /** Batas dt per frame & per sub-step simulasi. */
   maxFrameDt: 0.1,
   maxStepDt: 1 / 30,
   autosaveSeconds: 5,
 };
-
-export const MAX_VEHICLE_LEVEL = BALANCE.vehicleCapacity.length;

@@ -130,6 +130,16 @@ export class BuildingView {
     return this.group.localToWorld(out.copy(m.center));
   }
 
+  /** Bounding box bangunan penuh di ruang lokal grup bangunan (tanpa animasi/skala). */
+  localBounds(): THREE.Box3 {
+    const box = new THREE.Box3();
+    for (const m of this.mods) {
+      m.ghost.computeBoundingBox();
+      box.union(m.ghost.boundingBox!);
+    }
+    return box;
+  }
+
   /** Bounding box bangunan penuh (koordinat dunia) untuk framing kamera. */
   worldBounds(): THREE.Box3 {
     const box = new THREE.Box3();

@@ -79,6 +79,32 @@ function roadTexture(p: ThemePalette): THREE.CanvasTexture {
   return t;
 }
 
+function railTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#b3a89a';
+  g.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 180; i++) {
+    g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.12)' : 'rgba(60,50,40,0.12)';
+    g.fillRect(Math.random() * 64, Math.random() * 64, 3, 3);
+  }
+  // bantalan kayu melintang
+  for (const y of [8, 40]) {
+    g.fillStyle = '#8a5a36';
+    g.fillRect(4, y, 56, 13);
+    g.fillStyle = 'rgba(255,255,255,0.12)';
+    g.fillRect(4, y, 56, 3);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+
 export function dropTexture(): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 128;
@@ -122,15 +148,27 @@ export class TrackView {
   private gatePulse = 0;
   private time = 0;
   private readonly roadTex: THREE.CanvasTexture;
+  private readonly rail: boolean;
+  private halfW = HALF_W;
+  private curbIn = HALF_W;
+  private curbOut = HALF_W + CURB_W;
+  private curbH = CURB_H;
 
   constructor(
     readonly palette: ThemePalette,
     track: TrackPath,
     private exclusions: Vec2[],
-    opts: { gate?: boolean } = {},
+    opts: { gate?: boolean; style?: 'road' | 'rail' } = {},
   ) {
     this.track = track;
-    this.roadTex = roadTexture(palette);
+    this.rail = opts.style === 'rail';
+    if (this.rail) {
+      this.halfW = 0.52;
+      this.curbIn = 0.26;
+      this.curbOut = 0.34;
+      this.curbH = 0.07;
+    }
+    this.roadTex = this.rail ? railTexture() : roadTexture(palette);
     this.road = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({ map: this.roadTex, roughness: 0.92 }));
     this.road.receiveShadow = true;
     this.curbs = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }));
@@ -159,10 +197,11 @@ export class TrackView {
     this.bushes.castShadow = true;
     this.bushes.frustumCulled = false;
 
-    this.dropZone = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2 * 0.9, 0.9), new THREE.MeshBasicMaterial({ map: dropTexture(), transparent: true }));
+    this.dropZone = new THREE.Mesh(new THREE.PlaneGeometry(this.halfW * 2 * 0.9, 0.9), new THREE.MeshBasicMaterial({ map: dropTexture(), transparent: true }));
     this.dropZone.rotation.x = -Math.PI / 2;
 
-    this.group.add(this.road, this.curbs, this.chevrons, this.bushes);
+    this.group.add(this.road, this.curbs);
+    if (!this.rail) this.group.add(this.chevrons, this.bushes);
     if (opts.gate ?? true) {
       this.group.add(this.gate);
       this.buildGate();
@@ -296,7 +335,7 @@ export class TrackView {
     }
 
     // --- Jalan (ribbon) ---
-    const repeats = Math.max(1, Math.round(L / 2.2));
+    const repeats = Math.max(1, Math.round(L / (this.rail ? 0.9 : 2.2)));
     let geo = this.road.geometry;
     if (!geo.getAttribute('position') || geo.getAttribute('position').count !== (N + 1) * 2) {
       geo.dispose();
@@ -321,8 +360,8 @@ export class TrackView {
     const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
     for (let i = 0; i <= N; i++) {
       // vertex 0 = sisi luar, 1 = sisi dalam
-      pos.setXYZ(i * 2, xs[i] + nx[i] * HALF_W, 0.012, zs[i] + nz[i] * HALF_W);
-      pos.setXYZ(i * 2 + 1, xs[i] - nx[i] * HALF_W, 0.012, zs[i] - nz[i] * HALF_W);
+      pos.setXYZ(i * 2, xs[i] + nx[i] * this.halfW, 0.012, zs[i] + nz[i] * this.halfW);
+      pos.setXYZ(i * 2 + 1, xs[i] - nx[i] * this.halfW, 0.012, zs[i] - nz[i] * this.halfW);
       const v = (i / N) * repeats;
       uv.setXY(i * 2, 0, v);
       uv.setXY(i * 2 + 1, 1, v);
@@ -333,8 +372,8 @@ export class TrackView {
 
     // --- Kerb bergaris (dua sisi) ---
     const stripe = 5;
-    const cA = new THREE.Color(this.palette.curbA);
-    const cB = new THREE.Color(this.palette.curbB);
+    const cA = new THREE.Color(this.rail ? '#c9d0d8' : this.palette.curbA);
+    const cB = new THREE.Color(this.rail ? '#c9d0d8' : this.palette.curbB);
     const vertsPerSeg = 18;
     const count = N * 2 * vertsPerSeg;
     let cg = this.curbs.geometry;
@@ -357,8 +396,8 @@ export class TrackView {
       w++;
     };
     for (const side of [1, -1]) {
-      const r0 = HALF_W;
-      const r1 = HALF_W + CURB_W;
+      const r0 = this.curbIn;
+      const r1 = this.curbOut;
       for (let i = 0; i < N; i++) {
         const col = Math.floor(i / stripe) % 2 === 0 ? cA : cB;
         const j = i + 1;
@@ -370,7 +409,7 @@ export class TrackView {
         const bz0 = zs[j] + nz[j] * r0 * side;
         const bx1 = xs[j] + nx[j] * r1 * side;
         const bz1 = zs[j] + nz[j] * r1 * side;
-        const h = CURB_H;
+        const h = this.curbH;
         // atas (urutan CCW dilihat dari atas bergantung sisi)
         const top = side * sgn > 0 ? [ax0, az0, bx0, bz0, ax1, az1, ax1, az1, bx0, bz0, bx1, bz1] : [ax0, az0, ax1, az1, bx0, bz0, ax1, az1, bx1, bz1, bx0, bz0];
         for (let k = 0; k < 12; k += 2) put(top[k], h, top[k + 1], 0, 1, 0, col);
@@ -391,7 +430,7 @@ export class TrackView {
     cg.computeBoundingSphere();
 
     // --- Panah arah ---
-    const nChev = Math.min(MAX_CHEVRONS, Math.floor(L / 3));
+    const nChev = this.rail ? 0 : Math.min(MAX_CHEVRONS, Math.floor(L / 3));
     const tmp = new THREE.Vector3();
     const tan = new THREE.Vector3();
     for (let k = 0; k < nChev; k++) {
@@ -415,7 +454,7 @@ export class TrackView {
       const d = this.bushDs[k];
       this.pointAt(d, tmp);
       this.outwardAt(d, out);
-      tmp.addScaledVector(out, HALF_W + CURB_W + 0.42 + (k % 3) * 0.08);
+      tmp.addScaledVector(out, this.halfW + CURB_W + 0.42 + (k % 3) * 0.08);
       const s = this.bushScale[k] * (1 - wobble * 0.25);
       tmp.y = 0.18 * s;
       _q.setFromAxisAngle(_up, k * 1.7);
@@ -466,8 +505,8 @@ export class TrackView {
       const m = new THREE.Mesh(g, SHARED.vertexStd);
       m.castShadow = true;
       // letakkan di sisi jalan memakai normal dunia, lalu konversi ke lokal gate
-      const wx = n.x * (HALF_W + CURB_W + 0.18) * side;
-      const wz = n.z * (HALF_W + CURB_W + 0.18) * side;
+      const wx = n.x * (this.halfW + CURB_W + 0.18) * side;
+      const wz = n.z * (this.halfW + CURB_W + 0.18) * side;
       const local = new THREE.Vector3(wx, 0, wz).applyAxisAngle(_up, -this.gate.rotation.y);
       m.position.copy(local);
       return m;

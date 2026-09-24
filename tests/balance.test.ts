@@ -1,119 +1,116 @@
 import { describe, expect, it } from 'vitest';
-import { BALANCE } from '../src/config/balance';
-import { CITIES } from '../src/config/cities';
+import { LEVELS } from '../src/config/levels';
 import {
-  addMachine,
-  addVehicle,
-  canAddMachine,
-  canAddVehicle,
+  addWagon,
+  canAddWagon,
   canExpand,
-  canUpgrade,
+  canMerge,
+  canUpgradeCapacity,
+  canUpgradeSpeed,
   expandTrack,
-  mergeAuto,
+  mergeWagons,
   nextProject,
-  upgradeDepot,
+  upgradeCapacity,
+  upgradeSpeed,
 } from '../src/game/actions';
-import { addCost, buildingsDone, expandCost, findMergePair, machineCost, productionRate, trackOf, upgradeCost, vehicleCapacity } from '../src/game/economy';
-import { streetsUnlocked } from '../src/game/layout';
+import { addCost, buildingsDone, capacityCost, expandCost, forestCleared, isPlotComplete, isPlotUnlocked, mergeCost, speedCost } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
 import { step } from '../src/game/sim';
 import { createNewGame, createRuntime } from '../src/game/state';
 import type { GameState, Runtime } from '../src/game/types';
 
 /**
- * Bot pemain wajar (tanpa boost): selalu merge, lalu beli opsi termurah yang menjawab
- * bottleneck saat itu (angkut vs produksi) atau membuka jalan baru. Untuk menyetel angka.
+ * Bot pemain wajar (tanpa boost): beli opsi termurah yang masuk akal saat itu.
+ * Kapasitas diprioritaskan bila gergaji sering berhenti karena penuh; rel baru dibeli
+ * saat semua bangunan di cabang terbuka sudah jadi (atau jauh lebih murah dari opsi lain);
+ * selama menunggu rel baru, bot menabung dan hanya membeli upgrade yang murah.
  */
-function decide(state: GameState, rt: Runtime, log: string[], t: number, ev: GameEvent[]): string | null {
-  const stamp = `${t.toFixed(0).padStart(4)}s`;
-  if (findMergePair(state)) {
-    mergeAuto(state, ev);
-    log.push(`${stamp} merge → ${state.vehicles.map((v) => v.level).join(',')}`);
-    return 'merge';
-  }
-  const lap = trackOf(state).length / BALANCE.vehicleSpeed;
-  const runs = streetsUnlocked(CITIES[state.levelIndex], state.expandStage).length;
-  const transport = (state.vehicles.reduce((s, v) => s + vehicleCapacity(v.level), 0) * runs) / lap;
-  const production = productionRate(state);
+function decide(state: GameState, rt: Runtime, fullRatio: number): string | null {
   type Opt = { cost: number; run: () => void; label: string };
   const opts: Opt[] = [];
-  if (canAddVehicle(state).ok && transport < production * 1.15) opts.push({ cost: addCost(state), run: () => addVehicle(state, ev), label: 'add' });
-  if (production < transport * 1.15) {
-    const mc = machineCost(state);
-    if (mc !== null && canAddMachine(state).ok) opts.push({ cost: mc, run: () => addMachine(state, ev), label: 'machine' });
-    if (canUpgrade(state).ok) opts.push({ cost: upgradeCost(state), run: () => upgradeDepot(state, ev), label: `upgrade→${state.depot.level + 1}` });
-  }
+  if (canMerge(state).ok) opts.push({ cost: mergeCost(state) * 0.8, run: () => mergeWagons(state, []), label: 'merge' });
+  if (canAddWagon(state).ok) opts.push({ cost: addCost(state), run: () => addWagon(state, []), label: 'add' });
+  const sc = speedCost(state);
+  if (sc !== null && canUpgradeSpeed(state).ok) opts.push({ cost: sc * 1.1, run: () => upgradeSpeed(state, []), label: 'speed' });
+  const cc = capacityCost(state);
+  if (cc !== null && canUpgradeCapacity(state).ok) opts.push({ cost: cc * (fullRatio > 0.3 ? 0.6 : 1.3), run: () => upgradeCapacity(state, []), label: 'capacity' });
   const ec = expandCost(state);
-  if (ec !== null && canExpand(state).ok) opts.push({ cost: ec * 0.7, run: () => expandTrack(state, rt, ev), label: `EXPAND→${state.expandStage + 1}` });
+  const openDone = state.plots.every((_, i) => !isPlotUnlocked(state, i) || isPlotComplete(state, i));
+  if (ec !== null && canExpand(state).ok) opts.push({ cost: openDone ? 0 : ec * 0.9, run: () => expandTrack(state, rt, []), label: `EXPAND→${state.expandStage + 1}` });
   if (!opts.length) return null;
   opts.sort((a, b) => a.cost - b.cost);
+  // Cabang terbuka sudah jadi semua → menabung untuk rel baru, hanya belanja yang murah.
+  if (openDone && ec !== null && opts[0].cost > ec * 0.3) return null;
   opts[0].run();
-  log.push(`${stamp} ${opts[0].label} (uang→${Math.floor(state.money)})`);
   return opts[0].label;
 }
 
-function playCity(state: GameState, maxSeconds: number) {
+function playLevel(state: GameState, maxSeconds: number) {
   const rt = createRuntime();
-  const log: string[] = [];
   const ev: GameEvent[] = [];
   const firsts: Record<string, number> = {};
+  const log: string[] = [];
+  const buys: Record<string, number> = {};
   let t = 0;
   let acc = 0;
+  let full = 0;
+  let sampled = 0;
   let rent = 0;
-  let delivered = 0;
+  let sold = 0;
   while (!state.completed && t < maxSeconds) {
     ev.length = 0;
     step(state, rt, 1 / 30, ev);
     t += 1 / 30;
     acc += 1 / 30;
+    sampled++;
+    if (rt.fullTime > 0) full++;
     for (const e of ev) {
-      if (e.type === 'deliver') {
-        delivered += e.money;
-        firsts.deliver ??= t;
+      if (e.type === 'cut') firsts.cut ??= t;
+      if (e.type === 'sell') {
+        sold += e.money;
+        firsts.sell ??= t;
       }
-      if (e.type === 'rent') {
-        rent += e.amount;
-        firsts.rent ??= t;
-      }
-      if (e.type === 'plotComplete') firsts.firstHouse ??= t;
-      if (e.type === 'streetComplete') log.push(`${t.toFixed(0).padStart(4)}s  ✓ jalan ${e.street} selesai (+${e.bonus})`);
+      if (e.type === 'plotReady') firsts.plotReady ??= t;
+      if (e.type === 'plotComplete') firsts.house ??= t;
+      if (e.type === 'rent') rent += e.amount;
+      if (e.type === 'streetComplete') log.push(`${t.toFixed(0).padStart(4)}s ✓ jalur ${e.street} lengkap`);
     }
-    if (acc >= 0.5) {
+    if (acc >= 1) {
       acc = 0;
-      const r = decide(state, rt, log, t, ev);
-      if (r === 'add') firsts.add ??= t;
-      if (r === 'merge') firsts.merge ??= t;
-      if (r?.startsWith('EXPAND→1')) firsts.expand1 = t;
-      if (r?.startsWith('EXPAND→2')) firsts.expand2 = t;
-      if (r?.startsWith('EXPAND→3')) firsts.expand3 = t;
-      if (r === 'machine') firsts.machine ??= t;
+      const label = decide(state, rt, full / Math.max(1, sampled));
+      full = 0;
+      sampled = 0;
+      if (label) {
+        buys[label.startsWith('EXPAND') ? 'expand' : label] = (buys[label.startsWith('EXPAND') ? 'expand' : label] ?? 0) + 1;
+        if (label.startsWith('EXPAND')) log.push(`${t.toFixed(0).padStart(4)}s ${label} (bangunan ${buildingsDone(state).done})`);
+        firsts[label] ??= t;
+      }
     }
   }
-  return { t, log, firsts, rent, delivered };
+  return { t, firsts, log, buys, rent, sold };
 }
 
 describe('pacing (bot)', () => {
-  it('kedua kota selesai dengan tempo wajar tanpa softlock', () => {
+  it('kedua level selesai dengan tempo wajar tanpa softlock', () => {
     const state = createNewGame();
-    const res = [];
-    for (let ci = 0; ci < CITIES.length; ci++) {
-      const r = playCity(state, 2400);
-      res.push(r);
+    const results = [];
+    for (let li = 0; li < LEVELS.length; li++) {
+      const r = playLevel(state, 3600);
+      results.push(r);
       const b = buildingsDone(state);
-      console.log(`\n=== Kota ${ci + 1} (${CITIES[ci].id}) ${state.completed ? 'selesai' : 'BELUM'} dalam ${(r.t / 60).toFixed(2)} menit — bangunan ${b.done}/${b.total}`);
+      console.log(`\n=== Level ${li + 1} ${LEVELS[li].id}: ${state.completed ? 'selesai' : 'BELUM'} ${(r.t / 60).toFixed(2)} menit — bangunan ${b.done}/${b.total}, hutan ${(forestCleared(state) * 100).toFixed(0)}%`);
       console.log(`first: ${JSON.stringify(Object.fromEntries(Object.entries(r.firsts).map(([k, v]) => [k, Math.round(v)])))}`);
-      console.log(`uang dari kiriman ${r.delivered}, dari sewa ${r.rent}; kendaraan ${state.vehicles.map((v) => v.level).join(',')} | depot Lv${state.depot.level} ×${state.depot.machines} | uang ${Math.floor(state.money)}`);
+      console.log(`beli: ${JSON.stringify(r.buys)} | uang jual ${Math.round(r.sold)} sewa ${r.rent} | gerbong ${state.train.wagons.join(',')} spd${state.speedLevel} cap${state.capacityLevel} | uang ${Math.floor(state.money)}`);
       console.log(r.log.join('\n'));
       expect(state.completed).toBe(true);
       nextProject(state, []);
     }
-    const [c1, c2] = res;
-    expect(c1.firsts.deliver).toBeLessThan(5);
-    expect(c1.firsts.firstHouse).toBeLessThan(40);
-    expect(c1.firsts.add).toBeLessThan(40);
-    expect(c1.firsts.expand1).toBeLessThan(150);
-    expect(c1.t).toBeGreaterThan(180);
-    expect(c1.t).toBeLessThan(600);
-    expect(c2.t).toBeLessThan(900);
+    const [l1, l2] = results;
+    expect(l1.firsts.cut).toBeLessThan(3);
+    expect(l1.firsts.sell).toBeLessThan(20);
+    expect(l1.firsts.house).toBeLessThan(120);
+    expect(l1.t).toBeGreaterThan(180);
+    expect(l1.t).toBeLessThan(900);
+    expect(l2.t).toBeLessThan(1200);
   });
 });

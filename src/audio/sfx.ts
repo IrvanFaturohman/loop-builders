@@ -198,6 +198,65 @@ export class Sfx {
     this.tone(f * 1.5, 0.05, 'sine', 0.018, { delay: 0.03 });
   }
 
+  /** Blok tumbang: kayu "tok", batu "klak", kristal "ting", koin gemerincing. */
+  chop(kind: string): void {
+    if (!this.ok('chop', 55, 1)) return;
+    if (kind.startsWith('tree')) {
+      this.noise(0.06, 0.07, 'bandpass', this.vary(900, 0.25), { q: 3 });
+      this.tone(this.vary(kind === 'tree' ? 240 : kind === 'treeGold' ? 280 : 200, 0.08), 0.08, 'triangle', 0.05, { slide: 120 });
+    } else if (kind === 'rock') {
+      this.noise(0.07, 0.07, 'bandpass', this.vary(2200, 0.2), { q: 4 });
+      this.tone(this.vary(420), 0.05, 'square', 0.02, { slide: 260 });
+    } else if (kind === 'crystal') {
+      this.tone(this.vary(1760, 0.02), 0.18, 'sine', 0.05);
+      this.tone(this.vary(2637, 0.02), 0.14, 'sine', 0.03, { delay: 0.04 });
+    } else {
+      for (let i = 0; i < 3; i++) this.tone(this.vary(1500 + i * 300, 0.05), 0.06, 'triangle', 0.035, { delay: i * 0.05 });
+    }
+  }
+
+  /** Jual di stasiun: "ka-ching" + cascade koin sesuai besarnya uang. */
+  sell(money: number): void {
+    if (!this.ok('sell', 200)) return;
+    this.tone(987.77, 0.08, 'square', 0.04);
+    this.tone(1318.51, 0.2, 'square', 0.04, { delay: 0.08 });
+    const n = Math.min(8, 2 + Math.floor(Math.log2(1 + money)));
+    for (let i = 0; i < n; i++) this.tone(this.vary(1800 + i * 90, 0.05), 0.05, 'triangle', 0.025, { delay: 0.18 + i * 0.045 });
+    this.noise(0.25, 0.025, 'highpass', 6000, { delay: 0.15 });
+  }
+
+  /** Lahan kavling bersih: denting ceria. */
+  ready(): void {
+    if (!this.ok('ready', 300)) return;
+    [4, 6, 8].forEach((k, i) => this.tone(PENTA[k], 0.16, 'sine', 0.06, { delay: i * 0.06 }));
+  }
+
+  private saw: { osc: OscillatorNode; gain: GainNode; filter: BiquadFilterNode } | null = null;
+
+  /** Dengung gergaji halus selama sedang menebang. */
+  setSaw(intensity: number): void {
+    if (!this.ctx || !this.master || this.ctx.state !== 'running') return;
+    if (!this.saw) {
+      const osc = this.ctx.createOscillator();
+      const filter = this.ctx.createBiquadFilter();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 190;
+      filter.type = 'bandpass';
+      filter.frequency.value = 1400;
+      filter.Q.value = 2;
+      gain.gain.value = 0;
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.master);
+      osc.start();
+      this.saw = { osc, gain, filter };
+    }
+    const t = this.ctx.currentTime;
+    this.saw.gain.gain.setTargetAtTime(this.muted ? 0 : Math.min(1, intensity) * 0.012, t, 0.08);
+    this.saw.osc.frequency.setTargetAtTime(170 + intensity * 60 + Math.random() * 8, t, 0.05);
+  }
+
   modulePop(i: number): void {
     if (!this.ok('pop', 45, 1)) return;
     this.tone(this.vary(PENTA[i % PENTA.length], 0.015), 0.1, 'sine', 0.05, { slide: PENTA[i % PENTA.length] * 1.25 });

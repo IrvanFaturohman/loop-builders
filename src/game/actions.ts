@@ -1,213 +1,162 @@
-import { BALANCE, MAX_VEHICLE_LEVEL } from '../config/balance';
-import { CITIES } from '../config/cities';
-import {
-  addCost,
-  canUpgradeMore,
-  expandCost,
-  findMergePair,
-  machineCost,
-  maxVehicles,
-  moneyPerUnit,
-  plotsOf,
-  trackFor,
-  trackOf,
-  upgradeCost,
-  vehicleCapacity,
-} from './economy';
+import { BALANCE } from '../config/balance';
+import { LEVELS } from '../config/levels';
+import { addCost, capacityCost, expandCost, findMergePair, isPlotReady, mergeCost, plotsOf, speedCost } from './economy';
 import type { EventSink } from './events';
-import { pickupPoints } from './layout';
 import { setupLevel } from './state';
-import { buildStageMapping, type StageMapping } from './track';
+import { stageMapping } from './tracks';
 import type { GameState, Runtime } from './types';
+import { fieldFor } from './worldgen';
 
 export type ActionResult = { ok: true } | { ok: false; reason: string };
 
 const OK: ActionResult = { ok: true };
 const fail = (reason: string): ActionResult => ({ ok: false, reason });
 
+export { stageMapping };
+
 // ---------------------------------------------------------------------------
-// Add
+// Gerbong
 // ---------------------------------------------------------------------------
 
-export function canAddVehicle(state: GameState): ActionResult {
-  if (state.completed) return fail('Kota sudah selesai');
-  if (state.vehicles.length >= maxVehicles(state)) return fail('Jalan penuh — gabungkan kendaraan');
+export function canAddWagon(state: GameState): ActionResult {
+  if (state.completed) return fail('Level sudah selesai');
+  if (state.train.wagons.length >= BALANCE.maxWagons) return fail('Gerbong penuh — gabungkan dulu');
   if (state.money < addCost(state)) return fail('Uang belum cukup');
   return OK;
 }
 
-/** Posisi spawn: tengah celah terbesar antar kendaraan (tidak menabrak secara visual). */
-export function spawnDistance(state: GameState): number {
-  const track = trackOf(state);
-  const L = track.length;
-  if (state.vehicles.length === 0) return 0;
-  const ds = state.vehicles.map((v) => v.distance).sort((a, b) => a - b);
-  let bestGap = -1;
-  let bestStart = 0;
-  for (let i = 0; i < ds.length; i++) {
-    const a = ds[i];
-    const b = i + 1 < ds.length ? ds[i + 1] : ds[0] + L;
-    if (b - a > bestGap) {
-      bestGap = b - a;
-      bestStart = a;
-    }
-  }
-  return track.wrap(bestStart + bestGap / 2);
-}
-
-export function addVehicle(state: GameState, events: EventSink): ActionResult {
-  const can = canAddVehicle(state);
+/** Tambah gerbong gergaji Lv1 di ujung belakang kereta. */
+export function addWagon(state: GameState, events: EventSink): ActionResult {
+  const can = canAddWagon(state);
   if (!can.ok) return can;
   state.money -= addCost(state);
   state.addsPurchased++;
-  const v = { id: state.nextVehicleId++, level: 1, cargo: 0, distance: spawnDistance(state) };
-  state.vehicles.push(v);
+  state.train.wagons.push(1);
   state.tutorial.add = true;
-  events.push({ type: 'add', vehicleId: v.id });
+  events.push({ type: 'add', index: state.train.wagons.length - 1 });
   return OK;
 }
 
-// ---------------------------------------------------------------------------
-// Merge
-// ---------------------------------------------------------------------------
-
-export function canMerge(state: GameState, keepId: number, removeId: number): ActionResult {
-  if (state.completed) return fail('Kota sudah selesai');
-  if (keepId === removeId) return fail('Pilih dua kendaraan berbeda');
-  const a = state.vehicles.find((v) => v.id === keepId);
-  const b = state.vehicles.find((v) => v.id === removeId);
-  if (!a || !b) return fail('Kendaraan tidak ditemukan');
-  if (a.level !== b.level) return fail('Tingkat kendaraan harus sama');
-  if (a.level >= MAX_VEHICLE_LEVEL) return fail('Sudah tingkat maksimum');
+export function canMerge(state: GameState): ActionResult {
+  if (state.completed) return fail('Level sudah selesai');
+  if (!findMergePair(state)) return fail('Butuh 2 gerbong setingkat');
+  if (state.money < mergeCost(state)) return fail('Uang belum cukup');
   return OK;
 }
 
 /**
- * Menggabungkan dua kendaraan setingkat menjadi satu tingkat berikutnya.
- * Muatan dijumlahkan; kelebihan (hanya mungkin jika config diubah) dijual menjadi uang.
+ * Gabung dua gerbong setingkat terendah menjadi satu gerbong tingkat berikutnya
+ * (gergaji lebih tajam). Gerbong diurutkan ulang: tingkat tertinggi tepat di belakang lokomotif.
  */
-export function mergeVehicles(state: GameState, keepId: number, removeId: number, events: EventSink): ActionResult {
-  const can = canMerge(state, keepId, removeId);
+export function mergeWagons(state: GameState, events: EventSink): ActionResult {
+  const can = canMerge(state);
   if (!can.ok) return can;
-  const a = state.vehicles.find((v) => v.id === keepId)!;
-  const b = state.vehicles.find((v) => v.id === removeId)!;
-  a.level += 1;
-  const total = a.cargo + b.cargo;
-  a.cargo = Math.min(total, vehicleCapacity(a.level));
-  const overflowMoney = (total - a.cargo) * moneyPerUnit(state);
-  state.money += overflowMoney;
-  state.vehicles = state.vehicles.filter((v) => v.id !== removeId);
+  const [a, b] = findMergePair(state)!;
+  const level = state.train.wagons[a] + 1;
+  state.money -= mergeCost(state);
+  state.mergesPurchased++;
+  const rest = state.train.wagons.filter((_, i) => i !== a && i !== b);
+  rest.push(level);
+  state.train.wagons = rest.sort((x, y) => y - x);
   state.tutorial.merge = true;
-  events.push({ type: 'merge', keepId, removedId: removeId, level: a.level, overflowMoney });
+  events.push({ type: 'merge', a, b, level });
   return OK;
 }
 
-export function mergeAuto(state: GameState, events: EventSink): ActionResult {
-  const pair = findMergePair(state);
-  if (!pair) return fail('Butuh dua kendaraan setingkat');
-  return mergeVehicles(state, pair[0], pair[1], events);
-}
-
 // ---------------------------------------------------------------------------
-// Depot: upgrade produksi & tambah mesin
+// Kecepatan & kapasitas
 // ---------------------------------------------------------------------------
 
-export function canUpgrade(state: GameState): ActionResult {
-  if (state.completed) return fail('Kota sudah selesai');
-  if (!canUpgradeMore(state)) return fail('Produksi sudah maksimum');
-  if (state.money < upgradeCost(state)) return fail('Uang belum cukup');
+export function canUpgradeSpeed(state: GameState): ActionResult {
+  if (state.completed) return fail('Level sudah selesai');
+  const c = speedCost(state);
+  if (c === null) return fail('Kecepatan maksimum');
+  if (state.money < c) return fail('Uang belum cukup');
   return OK;
 }
 
-export function upgradeDepot(state: GameState, events: EventSink): ActionResult {
-  const can = canUpgrade(state);
+export function upgradeSpeed(state: GameState, events: EventSink): ActionResult {
+  const can = canUpgradeSpeed(state);
   if (!can.ok) return can;
-  state.money -= upgradeCost(state);
-  state.depot.level++;
-  state.tutorial.upgrade = true;
-  events.push({ type: 'upgrade', level: state.depot.level });
+  state.money -= speedCost(state)!;
+  state.speedLevel++;
+  state.tutorial.speed = true;
+  events.push({ type: 'speed', level: state.speedLevel });
   return OK;
 }
 
-export function canAddMachine(state: GameState): ActionResult {
-  if (state.completed) return fail('Kota sudah selesai');
-  const cost = machineCost(state);
-  if (cost === null) return fail('Mesin sudah maksimum');
-  if (state.money < cost) return fail('Uang belum cukup');
+export function canUpgradeCapacity(state: GameState): ActionResult {
+  if (state.completed) return fail('Level sudah selesai');
+  const c = capacityCost(state);
+  if (c === null) return fail('Kapasitas maksimum');
+  if (state.money < c) return fail('Uang belum cukup');
   return OK;
 }
 
-export function addMachine(state: GameState, events: EventSink): ActionResult {
-  const can = canAddMachine(state);
+export function upgradeCapacity(state: GameState, events: EventSink): ActionResult {
+  const can = canUpgradeCapacity(state);
   if (!can.ok) return can;
-  state.money -= machineCost(state)!;
-  const line = state.depot.machines;
-  state.depot.machines++;
-  state.depot.lines[line] = [];
-  state.depot.timers[line] = 0;
-  state.tutorial.machine = true;
-  events.push({ type: 'machine', line });
+  state.money -= capacityCost(state)!;
+  state.capacityLevel++;
+  state.tutorial.capacity = true;
+  events.push({ type: 'capacity', level: state.capacityLevel });
   return OK;
 }
 
 // ---------------------------------------------------------------------------
-// Expand (jalan baru)
+// Rel baru (expand)
 // ---------------------------------------------------------------------------
-
-const mappingCache = new Map<string, StageMapping>();
-
-/** Peta jarak lintasan tahap `from` → `to` (dipakai logika & animasi morph). */
-export function stageMapping(levelIndex: number, from: number, to: number): StageMapping {
-  const key = `${levelIndex}:${from}:${to}`;
-  let m = mappingCache.get(key);
-  if (!m) {
-    const city = CITIES[levelIndex];
-    const lo = Math.min(from, to);
-    const shared = [...pickupPoints(city), ...plotsOf(levelIndex).filter((p) => city.streets[p.street].unlockStage <= lo).map((p) => p.anchor)];
-    m = buildStageMapping(trackFor(levelIndex, from), trackFor(levelIndex, to), shared);
-    mappingCache.set(key, m);
-  }
-  return m;
-}
 
 export function canExpand(state: GameState): ActionResult {
-  if (state.completed) return fail('Kota sudah selesai');
+  if (state.completed) return fail('Level sudah selesai');
   const cost = expandCost(state);
-  if (cost === null) return fail('Semua jalan sudah dibuka');
+  if (cost === null) return fail('Semua jalur sudah dibuka');
   if (state.money < cost) return fail('Uang belum cukup');
   return OK;
 }
 
 /**
- * Jalan baru: lintasan diganti konfigurasi tahap berikutnya dan kavling di jalan baru terbuka.
- * Progres bangunan, muatan & jumlah kendaraan TIDAK berubah; posisi kendaraan dipetakan ke
- * lintasan baru dengan urutan relatif terhadap pickup & kavling lama tetap sama.
+ * Rel baru: lintasan diganti konfigurasi tahap berikutnya; blok di jalur rel baru
+ * dibersihkan. Progres bangunan, muatan & gerbong TIDAK berubah; posisi kereta dipetakan
+ * ke lintasan baru dengan urutan relatif terhadap stasiun & kavling lama tetap sama.
  */
 export function expandTrack(state: GameState, rt: Runtime | null, events: EventSink): ActionResult {
   const can = canExpand(state);
   if (!can.ok) return can;
-  const cost = expandCost(state)!;
   const from = state.expandStage;
   const to = from + 1;
-  const map = stageMapping(state.levelIndex, from, to);
-  state.money -= cost;
-  for (const v of state.vehicles) v.distance = map.map(v.distance);
+  state.money -= expandCost(state)!;
+  state.train.distance = stageMapping(state.levelIndex, from, to).map(state.train.distance);
   state.expandStage = to;
+  const f = fieldFor(state.levelIndex);
+  const cleared: number[] = [];
+  for (let c = 0; c < f.n; c++) {
+    if (f.railStage[c] === to && state.blocks[c] !== -1) {
+      state.blocks[c] = -1;
+      state.growth[c] = 0;
+      cleared.push(c);
+    }
+  }
   state.tutorial.expand = true;
   if (rt) rt.freeze = BALANCE.expandFreeze;
-  events.push({ type: 'expand', from, to });
+  events.push({ type: 'expand', from, to, cleared });
+  // Kavling di cabang baru yang kebetulan sudah bersih langsung siap dibangun.
+  const level = LEVELS[state.levelIndex];
+  for (const p of plotsOf(state.levelIndex)) {
+    if (level.streets[p.street].unlockStage === to && isPlotReady(state, p.index)) events.push({ type: 'plotReady', plot: p.index });
+  }
   return OK;
 }
 
 // ---------------------------------------------------------------------------
-// Kota berikutnya
+// Level berikutnya
 // ---------------------------------------------------------------------------
 
 export function nextProject(state: GameState, events: EventSink): ActionResult {
-  if (!state.completed) return fail('Selesaikan kota dulu');
+  if (!state.completed) return fail('Selesaikan semua bangunan dulu');
   let idx = state.levelIndex + 1;
   let cycle = state.cycle;
-  if (idx >= CITIES.length) {
+  if (idx >= LEVELS.length) {
     idx = 0;
     cycle++;
   }
@@ -217,5 +166,5 @@ export function nextProject(state: GameState, events: EventSink): ActionResult {
 }
 
 export function isLastLevel(state: GameState): boolean {
-  return state.levelIndex === CITIES.length - 1;
+  return state.levelIndex === LEVELS.length - 1;
 }

@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import type { MaterialKind } from '../game/types';
-import { itemGeometry } from './items';
+import { itemGeometry, type ItemKind } from './items';
 
 /**
  * Efek ringan dengan batas keras jumlah instance (object pooling via InstancedMesh):
@@ -27,9 +26,11 @@ interface Particle {
   spin: THREE.Vector3;
 }
 
+const FLY_KINDS: ItemKind[] = ['wood', 'stone', 'gem', 'coin', 'brick'];
+
 interface Flyer {
   alive: boolean;
-  kind: MaterialKind;
+  kind: ItemKind;
   from: THREE.Vector3;
   to: THREE.Vector3;
   getTo: (() => THREE.Vector3) | null;
@@ -69,12 +70,12 @@ export class Effects {
   readonly group = new THREE.Group();
   private readonly puffMesh: THREE.InstancedMesh;
   private readonly confMesh: THREE.InstancedMesh;
-  private readonly flyMeshes: Record<MaterialKind, THREE.InstancedMesh>;
+  private readonly flyMeshes = new Map<ItemKind, THREE.InstancedMesh>();
   private readonly puffs = makePool(MAX_PUFF);
   private readonly confetti = makePool(MAX_CONFETTI);
   private readonly flyers: Flyer[] = Array.from({ length: MAX_FLY }, () => ({
     alive: false,
-    kind: 'wood' as MaterialKind,
+    kind: 'wood' as ItemKind,
     from: new THREE.Vector3(),
     to: new THREE.Vector3(),
     getTo: null,
@@ -98,19 +99,14 @@ export class Effects {
     const confMat = new THREE.MeshLambertMaterial({ color: '#ffffff', side: THREE.DoubleSide });
     this.confMesh = new THREE.InstancedMesh(confGeo, confMat, MAX_CONFETTI);
     this.confMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CONFETTI * 3), 3);
-    const itemMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 });
-    this.flyMeshes = {
-      wood: new THREE.InstancedMesh(itemGeometry('wood'), itemMat, MAX_FLY),
-      brick: new THREE.InstancedMesh(itemGeometry('brick'), itemMat, MAX_FLY),
-    };
-    for (const m of [this.puffMesh, this.confMesh, this.flyMeshes.wood, this.flyMeshes.brick]) {
+    const itemMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6 });
+    for (const k of FLY_KINDS) this.flyMeshes.set(k, new THREE.InstancedMesh(itemGeometry(k), itemMat, MAX_FLY));
+    for (const m of [this.puffMesh, this.confMesh, ...this.flyMeshes.values()]) {
       m.count = 0;
       m.frustumCulled = false;
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       this.group.add(m);
     }
-    this.flyMeshes.wood.castShadow = true;
-    this.flyMeshes.brick.castShadow = true;
   }
 
   puff(pos: THREE.Vector3, opts: { count?: number; color?: string; size?: number; spread?: number; up?: number; life?: number } = {}): void {
@@ -193,7 +189,7 @@ export class Effects {
    * sehingga item mengejar kendaraan yang bergerak.
    */
   fly(
-    kind: MaterialKind,
+    kind: ItemKind,
     from: THREE.Vector3,
     to: THREE.Vector3,
     opts: { delay?: number; dur?: number; height?: number; getTo?: () => THREE.Vector3; onLand?: () => void; scale?: number } = {},
@@ -275,7 +271,7 @@ export class Effects {
     this.hideDead(this.confMesh, this.confetti, n);
 
     // Flying items
-    const counts: Record<MaterialKind, number> = { wood: 0, brick: 0 };
+    const counts = new Map<ItemKind, number>(FLY_KINDS.map((k) => [k, 0]));
     for (const f of this.flyers) {
       if (!f.alive) continue;
       if (f.delay > 0) {
@@ -297,12 +293,13 @@ export class Effects {
       const pop = t < 0.15 ? 0.6 + (t / 0.15) * 0.4 : 1;
       _s.setScalar(f.scale * pop);
       _m.compose(_p, _q, _s);
-      const mesh = this.flyMeshes[f.kind];
-      mesh.setMatrixAt(counts[f.kind]++, _m);
+      const mesh = this.flyMeshes.get(f.kind)!;
+      const n = counts.get(f.kind)!;
+      mesh.setMatrixAt(n, _m);
+      counts.set(f.kind, n + 1);
     }
-    for (const kind of ['wood', 'brick'] as MaterialKind[]) {
-      const mesh = this.flyMeshes[kind];
-      mesh.count = counts[kind];
+    for (const [kind, mesh] of this.flyMeshes) {
+      mesh.count = counts.get(kind)!;
       mesh.instanceMatrix.needsUpdate = true;
     }
   }

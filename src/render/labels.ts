@@ -10,11 +10,18 @@ export interface WorldLabel {
   visible: boolean;
   /** Offset piksel vertikal (negatif = ke atas). */
   dy: number;
+  /**
+   * Bila diisi: label dipusatkan di `pos` lalu digeser `awayPx` piksel menjauhi titik ini
+   * (di layar). Dipakai label muatan agar selalu di depan lokomotif, tidak menimpa gerbong.
+   */
+  away: THREE.Vector3 | null;
+  awayPx: number;
   set(html: string): void;
   setClass(cls: string, on: boolean): void;
 }
 
 const _v = new THREE.Vector3();
+const _a = new THREE.Vector3();
 
 export class LabelLayer {
   private readonly labels = new Set<WorldLabel>();
@@ -34,6 +41,8 @@ export class LabelLayer {
       pos: new THREE.Vector3(),
       visible: true,
       dy: 0,
+      away: null,
+      awayPx: 0,
       set(h: string) {
         if (h !== last) {
           el.innerHTML = h;
@@ -73,8 +82,18 @@ export class LabelLayer {
         continue;
       }
       if (l.el.style.display === 'none') l.el.style.display = '';
-      const x = (_v.x * 0.5 + 0.5) * width;
-      const y = (-_v.y * 0.5 + 0.5) * height + l.dy;
+      let x = (_v.x * 0.5 + 0.5) * width;
+      let y = (-_v.y * 0.5 + 0.5) * height + l.dy;
+      if (l.away) {
+        _a.copy(l.away).project(camera);
+        const dx = (_v.x - _a.x) * width;
+        const dy = (_a.y - _v.y) * height;
+        const len = Math.hypot(dx, dy) || 1;
+        x += (dx / len) * l.awayPx;
+        y += (dy / len) * l.awayPx;
+        l.el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -50%)`;
+        continue;
+      }
       l.el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
     }
   }

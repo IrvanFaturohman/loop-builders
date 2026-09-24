@@ -130,6 +130,16 @@ export class CameraRig {
     this.orbitSpeed = 0;
   }
 
+  /** Ikuti titik (kereta): titik tatap di-ease ke sana, jarak = jarak ikut saat ini. */
+  follow(x: number, z: number, distance: number): void {
+    this.goalTarget.set(x, 0, z);
+    this.goalDistance = distance;
+    this.goalYaw = 0.22;
+    this.goalPitch = 0.95;
+    this.ease = 3;
+    this.orbitSpeed = 0;
+  }
+
   /** Zoom (f < 1 mendekat). */
   zoom(f: number): void {
     this.goalDistance = THREE.MathUtils.clamp(this.goalDistance * f, this.minDist, this.maxDist);
@@ -153,9 +163,15 @@ export class CameraRig {
     this.yaw += (this.goalYaw - this.yaw) * k;
     this.pitch += (this.goalPitch - this.pitch) * k;
     this.orbit += this.orbitSpeed * dt;
-    // pegas teredam untuk bump
-    this.bumpVel += (-this.bumpPos * 180 - this.bumpVel * 16) * dt;
-    this.bumpPos += this.bumpVel * dt;
+    // Pegas teredam untuk bump — diintegrasikan dengan sub-langkah kecil supaya tetap stabil
+    // walau frame tersendat (dt besar membuat pegas kaku meledak & kamera terlempar).
+    const steps = Math.min(30, Math.ceil(dt / (1 / 240)));
+    const h = dt / Math.max(1, steps);
+    for (let i = 0; i < steps; i++) {
+      this.bumpVel += (-this.bumpPos * 180 - this.bumpVel * 16) * h;
+      this.bumpPos += this.bumpVel * h;
+    }
+    this.bumpPos = THREE.MathUtils.clamp(this.bumpPos, -1, 1);
     const d = this.dir(this.yaw + Math.sin(this.orbit) * 0.35, this.pitch);
     this.camera.position.copy(this.target).addScaledVector(d, this.distance);
     this.camera.position.y += this.bumpPos * 0.35;

@@ -8,7 +8,7 @@ export function fresh(): { state: GameState; rt: Runtime } {
 }
 
 /** Menjalankan simulasi selama `seconds` dengan sub-step `h`, mengumpulkan event. */
-export function run(state: GameState, rt: Runtime, seconds: number, h = 1 / 60): GameEvent[] {
+export function run(state: GameState, rt: Runtime, seconds: number, h = 1 / 30): GameEvent[] {
   const events: GameEvent[] = [];
   let t = 0;
   while (t < seconds - 1e-9) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { addMachine, addVehicle, expandTrack } from '../src/game/actions';
-import { plotTarget } from '../src/game/economy';
+import { addWagon, expandTrack } from '../src/game/actions';
 import { deserialize, loadGame, SAVE_KEY, saveGame, serialize } from '../src/game/save';
+import { fieldFor } from '../src/game/worldgen';
 import { fresh, run } from './helpers';
 
 class MemoryStorage implements Storage {
@@ -27,49 +27,57 @@ class MemoryStorage implements Storage {
 }
 
 describe('save/load', () => {
-  it('memulihkan kota, progres kavling, uang, jalan, kendaraan/muatan, depot/stok/conveyor', () => {
+  it('memulihkan hutan (HP blok), kereta/gerbong/muatan, rel, kavling, uang', () => {
     const { state, rt } = fresh();
-    state.money = 500;
-    addVehicle(state, []);
-    addMachine(state, []);
+    state.money = 300;
+    addWagon(state, []);
     expandTrack(state, rt, []);
     rt.freeze = 0;
-    run(state, rt, 17.3);
-    expect(deserialize(serialize(state))).toEqual(state);
+    run(state, rt, 23.7);
+    const s2 = deserialize(serialize(state))!;
+    expect(s2).not.toBeNull();
+    const { blocks: b1, growth: g1, ...rest1 } = state;
+    const { blocks: b2, growth: g2, ...rest2 } = s2;
+    expect(rest2).toEqual(rest1);
+    for (let i = 0; i < b1.length; i++) {
+      expect(b2[i]).toBeCloseTo(b1[i], 1);
+      expect(g2[i]).toBeCloseTo(g1[i], 1);
+    }
   });
 
   it('save rusak / versi lama → null dan dicadangkan', () => {
     const storage = new MemoryStorage();
-    storage.setItem(SAVE_KEY, '{"schema":2,"state":{"levelIndex":99}}');
+    storage.setItem(SAVE_KEY, '{"schema":3,"state":{"levelIndex":7}}');
     const res = loadGame(storage);
     expect(res.state).toBeNull();
     expect(res.corrupted).toBe(true);
-    expect(storage.getItem(SAVE_KEY)).toBeNull();
+    expect(deserialize('{"schema":2,"state":{}}')).toBeNull();
     expect(deserialize('bukan json')).toBeNull();
-    expect(deserialize('{"schema":1,"state":{}}')).toBeNull();
   });
 
-  it('kota yang selesai pulih dalam keadaan selesai', () => {
+  it('level selesai pulih dalam keadaan selesai', async () => {
     const { state } = fresh();
+    const { plotTarget } = await import('../src/game/economy');
     state.expandStage = 3;
-    for (let i = 0; i < state.plots.length; i++) state.plots[i] = plotTarget(state, i);
+    const f = fieldFor(0);
+    for (let i = 0; i < state.plots.length; i++) {
+      for (const c of f.plotCells[i]) state.blocks[c] = 0;
+      state.plots[i] = plotTarget(state, i);
+    }
     state.completed = true;
     const storage = new MemoryStorage();
     saveGame(storage, state);
-    const s2 = loadGame(storage).state!;
-    expect(s2.completed).toBe(true);
-    expect(s2.levelIndex).toBe(0);
+    expect(loadGame(storage).state!.completed).toBe(true);
   });
 
   it('merapikan nilai di luar batas', () => {
     const { state } = fresh();
-    state.vehicles[0].cargo = 99;
-    state.depot.storage = 500;
-    state.depot.lines[0] = [0.5, 0.2];
-    state.plots[state.plots.length - 1] = 30; // kavling di jalan terkunci
+    state.train.cargo = { wood: 999, stone: 0, gem: 0 };
+    state.plots[0] = 50; // lahan belum bersih → progres tidak sah
+    state.blocks[0] = 999;
     const s2 = deserialize(serialize(state))!;
-    expect(s2.vehicles[0].cargo).toBe(4);
-    expect(s2.depot.storage + s2.depot.lines.flat().length).toBeLessThanOrEqual(12);
-    expect(s2.plots[s2.plots.length - 1]).toBe(0);
+    expect(s2.train.cargo.wood).toBe(20);
+    expect(s2.plots[0]).toBe(0);
+    expect(s2.blocks[0]).toBeLessThanOrEqual(10);
   });
 });

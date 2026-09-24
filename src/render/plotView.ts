@@ -52,12 +52,16 @@ export class PlotView {
 
   private top: THREE.Vector3 | null = null;
 
-  /** Posisi dunia puncak bangunan (untuk label/pop sewa). Dihitung sekali lalu di-cache. */
+  /**
+   * Posisi dunia puncak bangunan (untuk label/pop sewa). Dihitung dari bentuk bangunan di
+   * ruang lokal + posisi/rotasi kavling (bukan dari matriks dunia yang sedang dianimasikan).
+   */
   topWorld(out: THREE.Vector3): THREE.Vector3 {
     if (!this.top) {
-      this.group.updateMatrixWorld(true);
-      const b = this.building.worldBounds();
-      this.top = new THREE.Vector3((b.min.x + b.max.x) / 2, b.max.y + 0.15, (b.min.z + b.max.z) / 2);
+      const b = this.building.localBounds();
+      const local = new THREE.Vector3((b.min.x + b.max.x) / 2, b.max.y + 0.2, (b.min.z + b.max.z) / 2 - 0.1);
+      local.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.plot.rotY);
+      this.top = local.add(new THREE.Vector3(this.plot.pos.x, 0.04, this.plot.pos.z));
     }
     return out.copy(this.top);
   }

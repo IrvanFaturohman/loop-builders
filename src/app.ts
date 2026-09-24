@@ -1,7 +1,7 @@
 import { Sfx } from './audio/sfx';
 import { BALANCE } from './config/balance';
-import { addMachine, addVehicle, expandTrack, mergeAuto, mergeVehicles, nextProject, upgradeDepot, type ActionResult } from './game/actions';
-import { cityDef, trackOf } from './game/economy';
+import { addWagon, expandTrack, mergeWagons, nextProject, upgradeCapacity, upgradeSpeed, type ActionResult } from './game/actions';
+import { levelDef } from './game/economy';
 import type { GameEvent } from './game/events';
 import { clearSave, loadGame, loadSettings, saveGame, saveSettings, type Settings } from './game/save';
 import { boostHold, boostTap, step } from './game/sim';
@@ -22,8 +22,7 @@ interface Touch {
 }
 
 /**
- * Kontroler utama: menghubungkan simulasi (state murni) ↔ render Three.js ↔ HUD DOM ↔ audio.
- * Loop: dt dibatasi → sub-step simulasi → event → efek/audio/HUD → render.
+ * Kontroler utama: simulasi (state murni) ↔ render Three.js ↔ HUD DOM ↔ audio.
  * Input: ketuk/tahan = ngebut, seret = geser kamera, cubit/scroll = zoom.
  */
 export class App {
@@ -33,7 +32,6 @@ export class App {
   private readonly hud: Hud;
   private readonly sfx = new Sfx();
   private settings: Settings;
-  private selectedVehicle: number | null = null;
   private readonly events: GameEvent[] = [];
   private last = 0;
   private resetClock = true;
@@ -41,6 +39,7 @@ export class App {
   private saveDebounce = -1;
   private completeTimer = -1;
   private transitioning = false;
+  private readyToastShown = false;
   private readonly touches = new Map<number, Touch>();
   private pinchDist = 0;
   private readonly canvas: HTMLCanvasElement;
@@ -58,17 +57,17 @@ export class App {
 
     this.world = new World(this.canvas, document.getElementById('labels')!, {
       onModulePop: (i) => this.sfx.modulePop(i),
-      onItemLand: (kind, big) => this.sfx.land(kind, big),
+      onCut: (kind) => this.sfx.chop(kind),
     });
     this.hud = new Hud({
-      add: () => this.act(addVehicle(this.state, this.events)),
-      merge: () => this.doMerge(),
+      add: () => this.act(addWagon(this.state, this.events)),
+      merge: () => this.act(mergeWagons(this.state, this.events)),
+      speed: () => this.act(upgradeSpeed(this.state, this.events)),
+      capacity: () => this.act(upgradeCapacity(this.state, this.events)),
       expand: () => this.doExpand(),
-      upgrade: () => this.act(upgradeDepot(this.state, this.events)),
-      machine: () => this.act(addMachine(this.state, this.events)),
       overview: () => {
         this.sfx.click();
-        this.world.overview(this.state);
+        this.world.toggleOverview(this.state);
       },
       toggleSound: () => this.setSound(this.settings.muted),
       openSettings: () => {
@@ -89,7 +88,7 @@ export class App {
     this.onResize();
     new ResizeObserver(() => this.onResize()).observe(this.appEl);
 
-    if (loaded.corrupted) this.hud.toast('Save lama/rusak — memulai kota baru', 2.5);
+    if (loaded.corrupted) this.hud.toast('Save lama/rusak — memulai permainan baru', 2.5);
     if (this.state.completed) this.hud.showComplete(this.state);
     else this.showTitle();
     requestAnimationFrame((t) => this.frame(t));
@@ -107,7 +106,7 @@ export class App {
       dt = 0;
       this.resetClock = false;
     }
-    // dt dibatasi: tab yang ditinggal tidak membuat kendaraan "melompat".
+    // dt dibatasi: tab yang ditinggal tidak membuat kereta "melompat".
     dt = Math.max(0, Math.min(BALANCE.maxFrameDt, dt));
 
     if (!document.hidden && !this.transitioning && !this.hud.settingsOpen) {
@@ -121,11 +120,12 @@ export class App {
     this.processEvents();
     if (updateTutorialFlags(this.state, this.rt)) this.requestSave(0.5);
 
-    this.world.selectedVehicle = this.selectedVehicle;
     this.world.update(dt, this.state, this.rt);
-    this.hud.update(this.state, this.rt, { selectedVehicle: this.selectedVehicle, muted: this.settings.muted }, dt);
+    this.hud.update(this.state, this.rt, { muted: this.settings.muted, overview: this.world.overviewMode }, dt);
     this.updateTutorial();
-    this.sfx.setEngine(this.rt.boost.mult, !this.state.completed && this.rt.freeze <= 0 && !document.hidden);
+    const running = !this.state.completed && this.rt.freeze <= 0 && !document.hidden;
+    this.sfx.setEngine(this.rt.boost.mult, running);
+    this.sfx.setSaw(running ? this.rt.cutHeat : 0);
     this.sfx.tick(dt);
     this.world.render();
 
@@ -144,22 +144,28 @@ export class App {
   private processEvents(): void {
     if (!this.events.length) return;
     this.world.handleEvents(this.events, this.state);
-    const mat = cityDef(this.state).material;
+    const res = levelDef(this.state).buildResource;
     for (const e of this.events) {
       switch (e.type) {
-        case 'produced':
-          this.sfx.produce(mat);
+        case 'cut':
+          if (e.money > 0) this.hud.moneyGain(e.money);
           break;
-        case 'stored':
-          this.sfx.stored();
-          break;
-        case 'pickup':
-          this.sfx.pickup(e.amount);
+        case 'plotReady':
+          this.sfx.ready();
+          if (!this.readyToastShown) {
+            this.readyToastShown = true;
+            this.hud.toast(`Lahan bersih! Kereta akan membawa ${res === 'wood' ? 'kayu' : 'batu'} untuk membangun`, 2.8);
+          }
+          this.requestSave(0.5);
           break;
         case 'deliver':
-          this.sfx.unload(e.amount, mat);
-          this.hud.moneyGain(e.money);
+          this.sfx.unload(e.amount, res === 'wood' ? 'wood' : 'brick');
           this.requestSave(1.5);
+          break;
+        case 'sell':
+          this.sfx.sell(e.money);
+          this.hud.moneyGain(e.money);
+          this.requestSave(1);
           break;
         case 'rent':
           this.sfx.rent();
@@ -176,7 +182,6 @@ export class App {
         case 'projectComplete':
           this.sfx.projectComplete();
           this.hud.moneyGain(e.bonus + e.leftover);
-          this.selectedVehicle = null;
           this.releaseBoost();
           this.completeTimer = 2.2;
           this.saveNow();
@@ -188,20 +193,18 @@ export class App {
         case 'merge':
           this.sfx.merge(e.level);
           this.hud.bought('merge');
-          if (e.overflowMoney > 0) this.hud.moneyGain(e.overflowMoney);
+          break;
+        case 'speed':
+          this.sfx.upgrade();
+          this.hud.bought('speed');
+          break;
+        case 'capacity':
+          this.sfx.upgrade();
+          this.hud.bought('capacity');
           break;
         case 'expand':
           this.sfx.expand();
           this.hud.bought('expand');
-          break;
-        case 'machine':
-          this.sfx.build();
-          this.hud.bought('machine');
-          break;
-        case 'upgrade':
-          this.sfx.upgrade();
-          this.sfx.purchase();
-          this.hud.bought('upgrade');
           break;
         default:
           break;
@@ -211,7 +214,7 @@ export class App {
   }
 
   // ---------------------------------------------------------------------------
-  // Aksi pemain
+  // Aksi
   // ---------------------------------------------------------------------------
 
   private act(r: ActionResult): boolean {
@@ -225,53 +228,9 @@ export class App {
     return true;
   }
 
-  private doMerge(): void {
-    if (this.selectedVehicle !== null) {
-      const sel = this.state.vehicles.find((v) => v.id === this.selectedVehicle);
-      if (sel) {
-        const L = trackOf(this.state).length;
-        const partner = this.state.vehicles
-          .filter((v) => v.id !== sel.id && v.level === sel.level)
-          .sort((a, b) => ((sel.distance - a.distance + L) % L) - ((sel.distance - b.distance + L) % L))[0];
-        if (partner) {
-          if (this.act(mergeVehicles(this.state, sel.id, partner.id, this.events))) this.selectedVehicle = null;
-          return;
-        }
-      }
-      this.selectedVehicle = null;
-    }
-    this.act(mergeAuto(this.state, this.events));
-  }
-
   private doExpand(): void {
-    // Satu animasi jalan baru sekaligus: tunggu jalan sebelumnya selesai tumbuh.
     if (this.rt.freeze > 0) return;
     this.act(expandTrack(this.state, this.rt, this.events));
-  }
-
-  private onVehicleTap(id: number): void {
-    const v = this.state.vehicles.find((x) => x.id === id);
-    if (!v || this.state.completed) return;
-    if (this.selectedVehicle === null || !this.state.vehicles.some((x) => x.id === this.selectedVehicle)) {
-      this.selectedVehicle = id;
-      this.sfx.select();
-      const partners = this.state.vehicles.filter((x) => x.id !== id && x.level === v.level).length;
-      this.hud.toast(partners > 0 ? `Lv${v.level} dipilih — ketuk truk Lv${v.level} lain` : `Lv${v.level} dipilih — belum ada pasangan setingkat`, 1.8);
-      return;
-    }
-    if (this.selectedVehicle === id) {
-      this.selectedVehicle = null;
-      this.sfx.click();
-      return;
-    }
-    const sel = this.state.vehicles.find((x) => x.id === this.selectedVehicle)!;
-    if (sel.level !== v.level) {
-      this.selectedVehicle = id;
-      this.sfx.select();
-      this.hud.toast(`Tingkat berbeda — Lv${v.level} dipilih`, 1.6);
-      return;
-    }
-    if (this.act(mergeVehicles(this.state, sel.id, id, this.events))) this.selectedVehicle = null;
   }
 
   private next(): void {
@@ -283,7 +242,6 @@ export class App {
       nextProject(this.state, this.events);
       this.events.length = 0;
       this.rt = createRuntime();
-      this.selectedVehicle = null;
       this.completeTimer = -1;
       this.world.loadLevel(this.state);
       this.applyAmbience();
@@ -301,7 +259,6 @@ export class App {
     clearSave(this.storage);
     this.state = createNewGame();
     this.rt = createRuntime();
-    this.selectedVehicle = null;
     this.completeTimer = -1;
     this.events.length = 0;
     this.world.loadLevel(this.state);
@@ -324,12 +281,11 @@ export class App {
   }
 
   private showTitle(): void {
-    const city = cityDef(this.state);
-    this.hud.showTitle(`Kota ${this.state.levelIndex + 1 + this.state.cycle * 2}`, city.name);
+    this.hud.showTitle(`Level ${this.state.levelIndex + 1 + this.state.cycle * 2}`, levelDef(this.state).name);
   }
 
   private applyAmbience(): void {
-    this.sfx.ambience = cityDef(this.state).theme === 'city' ? 'none' : 'birds';
+    this.sfx.ambience = 'birds';
   }
 
   // ---------------------------------------------------------------------------
@@ -365,7 +321,6 @@ export class App {
 
   private bindInput(): void {
     const c = this.canvas;
-    // Audio hanya bisa dimulai setelah gesture pengguna.
     const unlock = () => this.sfx.unlock();
     window.addEventListener('pointerdown', unlock, { capture: true });
     window.addEventListener('keydown', unlock, { capture: true });
@@ -381,25 +336,13 @@ export class App {
       const t: Touch = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, boost: false, panning: false, consumed: false };
       this.touches.set(e.pointerId, t);
       if (this.touches.size >= 2) {
-        // Dua jari: cubit untuk zoom, hentikan boost & geser.
         this.releaseBoost();
         for (const o of this.touches.values()) o.consumed = true;
         this.pinchDist = this.pinchDistance();
         return;
       }
-      const pick = this.world.pick(e.clientX, e.clientY, c.getBoundingClientRect());
-      if (pick && !this.state.completed) {
-        t.consumed = true;
-        if (pick.type === 'vehicle') this.onVehicleTap(pick.id);
-        else {
-          this.sfx.click();
-          this.hud.flashStationBar();
-        }
-        return;
-      }
-      if (this.selectedVehicle !== null) this.selectedVehicle = null;
       if (this.state.completed) return;
-      // Tap di area dunia → boost; tahan → dipertahankan; seret → berubah jadi geser kamera.
+      // Ketuk → boost; tahan → dipertahankan; seret → berubah jadi geser kamera.
       t.boost = true;
       boostHold(this.rt, true);
       if (!this.rt.boost.exhausted) this.sfx.boostStart();
@@ -451,7 +394,6 @@ export class App {
       },
       { passive: false },
     );
-    // Cegah zoom/scroll browser tak sengaja (iOS gesture & double-tap).
     document.addEventListener('gesturestart', (e) => e.preventDefault());
     document.addEventListener('dblclick', (e) => e.preventDefault());
     document.addEventListener(
@@ -474,28 +416,25 @@ export class App {
           boostHold(this.rt, true);
           break;
         case 'a':
-          this.act(addVehicle(this.state, this.events));
+          this.act(addWagon(this.state, this.events));
           break;
         case 'm':
-          this.doMerge();
+          this.act(mergeWagons(this.state, this.events));
+          break;
+        case 's':
+          this.act(upgradeSpeed(this.state, this.events));
+          break;
+        case 'c':
+          this.act(upgradeCapacity(this.state, this.events));
           break;
         case 'e':
           this.doExpand();
           break;
-        case 'u':
-          this.act(upgradeDepot(this.state, this.events));
-          break;
-        case 'n':
-          this.act(addMachine(this.state, this.events));
-          break;
         case 'o':
-          this.world.overview(this.state);
+          this.world.toggleOverview(this.state);
           break;
         case 'enter':
           if (this.state.completed && this.hud.completeVisible) this.next();
-          break;
-        case 'escape':
-          this.selectedVehicle = null;
           break;
         default:
           break;
@@ -547,10 +486,6 @@ export class App {
     this.margins = m;
     this.world.resize(w, h, m.top + 6, m.bottom + 6, m.right, this.state);
   }
-
-  // ---------------------------------------------------------------------------
-  // Save
-  // ---------------------------------------------------------------------------
 
   private requestSave(delay: number): void {
     if (this.saveDebounce <= 0 || this.saveDebounce > delay) this.saveDebounce = delay;

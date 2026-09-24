@@ -1,5 +1,6 @@
+import { LEVELS } from '../config/levels';
 import type { TrackShape } from './track';
-import type { CityDefinition, HubSide, PlotDef, Vec2 } from './types';
+import type { LevelDefinition, HubSide, PlotDef, Vec2 } from './types';
 
 /**
  * Tata letak kota: menghasilkan titik sudut loop tertutup untuk sebuah tahap expand,
@@ -67,7 +68,7 @@ export interface StreetGeo {
   out: Vec2;
 }
 
-function streetGeo(city: CityDefinition, si: number): StreetGeo {
+function streetGeo(city: LevelDefinition, si: number): StreetGeo {
   const st = city.streets[si];
   const H = city.hubHalf;
   const L = city.laneHalf;
@@ -80,8 +81,20 @@ function streetGeo(city: CityDefinition, si: number): StreetGeo {
   return { street: si, side: st.side, a, b, c, d, out: g.out };
 }
 
-/** Semua kavling kota (posisi tidak bergantung tahap). */
-export function resolvePlots(city: CityDefinition): ResolvedPlot[] {
+const plotCache = new Map<number, ResolvedPlot[]>();
+
+/** Kavling sebuah level (di-cache). */
+export function plotsOfLevel(levelIndex: number): ResolvedPlot[] {
+  let p = plotCache.get(levelIndex);
+  if (!p) {
+    p = resolvePlots(LEVELS[levelIndex]);
+    plotCache.set(levelIndex, p);
+  }
+  return p;
+}
+
+/** Semua kavling (posisi tidak bergantung tahap). */
+export function resolvePlots(city: LevelDefinition): ResolvedPlot[] {
   const out: ResolvedPlot[] = [];
   city.streets.forEach((st, si) => {
     const g = streetGeo(city, si);
@@ -111,7 +124,7 @@ export function resolvePlots(city: CityDefinition): ResolvedPlot[] {
 }
 
 /** Titik sudut loop untuk tahap `stage` (titik pertama = titik awal di sisi barat, di ruas lurus). */
-export function stageCorners(city: CityDefinition, stage: number): [number, number][] {
+export function stageCorners(city: LevelDefinition, stage: number): [number, number][] {
   const H = city.hubHalf;
   const L = city.laneHalf;
   const r = city.radius;
@@ -133,7 +146,7 @@ export function stageCorners(city: CityDefinition, stage: number): [number, numb
 }
 
 /** Titik pickup di keempat sisi depot, tepat sebelum pangkal jalan di sisi tersebut. */
-export function pickupPoints(city: CityDefinition): Vec2[] {
+export function pickupPoints(city: LevelDefinition): Vec2[] {
   const H = city.hubHalf;
   const L = city.laneHalf;
   return SIDE_ORDER.map((side) => {
@@ -142,24 +155,24 @@ export function pickupPoints(city: CityDefinition): Vec2[] {
   });
 }
 
-export function stageDef(city: CityDefinition, stage: number): TrackShape {
+export function stageDef(city: LevelDefinition, stage: number): TrackShape {
   return { corners: stageCorners(city, stage), radius: city.radius };
 }
 
-export function stageCount(city: CityDefinition): number {
+export function stageCount(city: LevelDefinition): number {
   return city.expandCosts.length + 1;
 }
 
-export function streetsUnlocked(city: CityDefinition, stage: number): number[] {
+export function streetsUnlocked(city: LevelDefinition, stage: number): number[] {
   return city.streets.map((s, i) => (s.unlockStage <= stage ? i : -1)).filter((i) => i >= 0);
 }
 
-export function streetGeometry(city: CityDefinition, si: number): StreetGeo {
+export function streetGeometry(city: LevelDefinition, si: number): StreetGeo {
   return streetGeo(city, si);
 }
 
 /** Kotak batas (x/z) area yang terpakai pada tahap tertentu (jalan + kavling terbuka). */
-export function stageBounds(city: CityDefinition, stage: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
+export function stageBounds(city: LevelDefinition, stage: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
   const H = city.hubHalf + 0.9;
   let b = { minX: -H, maxX: H, minZ: -H, maxZ: H };
   const plots = resolvePlots(city);
@@ -178,7 +191,7 @@ export function stageBounds(city: CityDefinition, stage: number): { minX: number
 }
 
 /** Kotak batas satu jalan beserta kavlingnya. */
-export function streetBounds(city: CityDefinition, si: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
+export function streetBounds(city: LevelDefinition, si: number): { minX: number; maxX: number; minZ: number; maxZ: number } {
   const g = streetGeo(city, si);
   let b = { minX: Infinity, maxX: -Infinity, minZ: Infinity, maxZ: -Infinity };
   const grow = (x: number, z: number, e: number) => {
