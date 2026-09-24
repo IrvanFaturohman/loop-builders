@@ -8,27 +8,20 @@ export const BALANCE = {
   /** Kecepatan dasar kereta (unit dunia per detik) & kenaikan per level Kecepatan. */
   speed: { base: 3.4, perLevel: 0.1, maxLevel: 20 },
   /** Kapasitas gerbong muatan dasar & pengali per level Kapasitas. */
-  capacity: { base: 20, growth: 1.3, maxLevel: 20 },
+  capacity: { base: 26, growth: 1.3, maxLevel: 20 },
   /**
-   * Pemotong: kerusakan per detik pada satu target (Lv1) & pengali per tingkat merge;
-   * panjang lengan Lv1 harus menjangkau tepi terjauh pita hutan (diuji di layout.test.ts).
+   * Pemotong: kerusakan per detik pada satu blok (Lv1) & pengali per tingkat merge. Gerinda
+   * menempel di sisi kiri gerbong (`side` dari garis tengah rel) dan memotong blok yang pusatnya
+   * dalam `reach` dari pusat piringan. Hanya memotong selama kereta bergerak.
    */
-  cutter: { dps: 3.5, growth: 1.8, reach: 3.8, reachPerLevel: 0.3 },
+  cutter: { dps: 10, growth: 1.6, side: 0.55, reach: 0.95, reachPerLevel: 0.1 },
   /** Jarak antar gerbong di rel. */
   wagonSpacing: 1.05,
   maxCutters: 12,
   maxCutterLevel: 8,
 
-  boost: {
-    mult: 1.7,
-    tapDuration: 0.65,
-    maxHoldSeconds: 7,
-    rechargeSeconds: 4.5,
-    rechargeDelay: 0.5,
-    resumeAt: 0.3,
-    accel: 10,
-    decel: 3.2,
-  },
+  /** Kontrol: tahan layar = jalan, tap = maju sebentar; kereta diam tanpa input. */
+  drive: { tap: 0.45, tapMax: 1.2, accel: 7, decel: 6 },
 
   cost: {
     add: { base: 10, growth: 1.55 },
@@ -55,7 +48,6 @@ export const BALANCE = {
 
   /** Pengali biaya upgrade & koin tiap putaran ulang daftar level. */
   cycleScale: 0.6,
-  expandFreeze: 1.35,
   maxFrameDt: 0.1,
   maxStepDt: 1 / 30,
   autosaveSeconds: 5,

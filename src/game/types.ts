@@ -2,13 +2,13 @@
  * Struktur data inti permainan. Semua yang ada di sini murni data (tanpa Three.js / DOM),
  * sehingga logika simulasi bisa diuji di Node dan disimpan ke localStorage.
  *
- * Konsep (mengikuti Train Miner): kereta berjalan searah jarum jam di rel cincin yang
- * mengelilingi kota. Susunannya lokomotif → satu gerbong muatan → gerbong pemotong.
- * Pemotong menjulurkan lengan ke kiri (sisi luar loop, arah hutan) dan menebang satu blok
- * sekaligus. Muatan dibongkar di stasiun dan langsung dipasang ke bangunan kota; setiap poin
- * bahan yang terpasang menjadi koin. Saat pita hutan di luar rel bersih, rel melebar keluar
- * sendiri dan lahan bekasnya menjadi distrik kota berikutnya. Hutan tidak tumbuh kembali:
- * total bahan di hutan sama persis dengan total kebutuhan kota.
+ * Konsep (mengikuti Train Miner): kereta berjalan searah jarum jam di rel yang mengelilingi
+ * kota, hanya selama pemain menahan/mengetuk layar. Susunannya lokomotif → satu gerbong
+ * muatan → gerbong pemotong. Gerinda di sisi kiri pemotong (arah hutan) menggerus blok yang
+ * menempel ke rel. Rel mengikuti baris hutan terdepan: begitu blok hancur, rel di titik itu
+ * langsung maju, dan blok keras membuat rel berbelok mengitarinya. Muatan dibongkar di stasiun
+ * dan langsung dipasang ke bangunan kota di belakang rel; setiap poin bahan menjadi koin.
+ * Hutan tidak tumbuh kembali: total bahan di hutan sama persis dengan total kebutuhan kota.
  */
 
 export type MaterialKind = 'wood' | 'brick';
@@ -48,15 +48,13 @@ export interface LevelDefinition {
   theme: ThemeKind;
   /** Tampilan bangunan: kayu atau bata. */
   material: MaterialKind;
-  /** Setengah lebar rel cincin pertama (pusat → garis tengah rel di sisi lurus). */
+  /** Setengah lebar rel awal (persegi; pusat → garis tengah rel). */
   ringStart: number;
-  /** Jarak antar cincin rel = lebar pita hutan yang dibersihkan per tahap. */
+  /** Lebar tiap pita hutan (zona jenis blok) = jarak antar cincin kavling distrik. */
   ringStep: number;
-  /** Radius lengkung sudut rel cincin pertama (cincin berikutnya = offset, radius ikut membesar). */
-  cornerRadius: number;
-  /** Satu distrik per tahap; jumlahnya menentukan jumlah tahap rel. */
+  /** Distrik k dibiayai pita hutan k; kavlingnya terbuka satu per satu saat rel melewatinya. */
   districts: DistrictDef[];
-  /** Bobot jenis blok per pita hutan (indeks = tahap). */
+  /** Bobot jenis blok per pita hutan (indeks = distrik). */
   bands: Partial<Record<BlockKind, number>>[];
   /** Setengah lebar peta (grid sel dibuat di [-mapHalf, mapHalf]). */
   mapHalf: number;
@@ -119,7 +117,7 @@ export interface Train {
 }
 
 export interface TutorialFlags {
-  boost: boolean;
+  drive: boolean;
   add: boolean;
   merge: boolean;
   capacity: boolean;
@@ -146,7 +144,6 @@ export interface GameState {
   /** Poin bahan di gudang stasiun yang belum punya bangunan terbuka. */
   stock: number;
   completed: boolean;
-  expandStage: number;
   train: Train;
   speedLevel: number;
   capacityLevel: number;
@@ -160,24 +157,23 @@ export interface GameState {
 // State sementara (tidak disimpan)
 // ---------------------------------------------------------------------------
 
-export interface BoostState {
-  energy: number;
+export interface DriveState {
+  /** Pemain sedang menahan layar/spasi. */
   holding: boolean;
+  /** Sisa detik dorongan dari tap. */
   tapTimer: number;
-  exhausted: boolean;
-  rechargeDelay: number;
-  mult: number;
+  /** Laju saat ini sebagai porsi kecepatan penuh (0 = diam). */
+  v: number;
+  /** Total detik kereta digerakkan pemain (untuk tutorial). */
   usedSeconds: number;
 }
 
 export interface Runtime {
-  boost: BoostState;
-  /** Detik kereta dibekukan (animasi rel melebar). */
-  freeze: number;
-  /** Detik terakhir pemotong menebang (untuk audio/visual). */
+  drive: DriveState;
+  /** Detik terakhir pemotong menggerus (untuk audio/visual). */
   cutHeat: number;
   /** Detik muatan penuh berturut-turut (untuk hint kapasitas). */
   fullTime: number;
-  /** Sel yang sedang dipotong tiap pemotong (-1 = lengan ditarik). Render membacanya untuk posisi lengan. */
+  /** Sel yang sedang digerus tiap pemotong (-1 = tidak ada). Render membacanya untuk gerinda. */
   targets: number[];
 }

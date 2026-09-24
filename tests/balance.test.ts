@@ -18,9 +18,9 @@ import { createNewGame, createRuntime } from '../src/game/state';
 import type { GameState } from '../src/game/types';
 
 /**
- * Bot pemain wajar (tanpa boost): beli opsi termurah yang masuk akal saat itu.
+ * Bot pemain yang terus menahan layar: beli opsi termurah yang masuk akal saat itu.
  * Kapasitas diprioritaskan bila pemotong sering berhenti karena muatan penuh.
- * Rel melebar sendiri, jadi bot tidak perlu menabung untuk apa pun.
+ * Rel maju sendiri mengikuti hutan, jadi bot tidak perlu menabung untuk apa pun.
  */
 function decide(state: GameState, fullRatio: number): string | null {
   type Opt = { cost: number; run: () => void; label: string };
@@ -39,6 +39,7 @@ function decide(state: GameState, fullRatio: number): string | null {
 
 function playLevel(state: GameState, maxSeconds: number) {
   const rt = createRuntime();
+  rt.drive.holding = true;
   const ev: GameEvent[] = [];
   const firsts: Record<string, number> = {};
   const log: string[] = [];
@@ -49,6 +50,8 @@ function playLevel(state: GameState, maxSeconds: number) {
   let sampled = 0;
   let built = 0;
   let bonus = 0;
+  let grows = 0;
+  let nextMark = 0.25;
   while (!state.completed && t < maxSeconds) {
     ev.length = 0;
     step(state, rt, 1 / 30, ev);
@@ -64,10 +67,16 @@ function playLevel(state: GameState, maxSeconds: number) {
         firsts.house ??= t;
         bonus += e.bonus;
       }
-      if (e.type === 'expand') log.push(`${t.toFixed(0).padStart(4)}s rel → cincin ${e.to + 1} (bangunan ${buildingsDone(state).done}, hutan ${(forestCleared(state) * 100).toFixed(0)}%)`);
+      if (e.type === 'railGrow') grows++;
+      if (e.type === 'plotOpen') firsts.plotOpen ??= t;
     }
     if (acc >= 1) {
       acc = 0;
+      const cleared = forestCleared(state);
+      if (cleared >= nextMark) {
+        log.push(`${t.toFixed(0).padStart(4)}s hutan ${(cleared * 100).toFixed(0)}% · bangunan ${buildingsDone(state).done} · rel maju ${grows}x`);
+        nextMark += 0.25;
+      }
       const label = decide(state, full / Math.max(1, sampled));
       full = 0;
       sampled = 0;
@@ -100,7 +109,6 @@ describe('pacing (bot)', () => {
     expect(l1.firsts.cut).toBeLessThan(3);
     expect(l1.firsts.unload).toBeLessThan(20);
     expect(l1.firsts.house).toBeLessThan(60);
-    for (const r of results) expect(r.log.length).toBe(3); // rel melebar 3× per level
     expect(l1.t).toBeGreaterThan(240);
     expect(l1.t).toBeLessThan(600);
     expect(l2.t).toBeLessThan(720);

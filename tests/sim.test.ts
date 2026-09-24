@@ -1,22 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { BALANCE } from '../src/config/balance';
-import { LEVELS } from '../src/config/levels';
-import {
-  bandPoints,
-  buildCoins,
-  capacity,
-  cargoPoints,
-  cargoTotal,
-  cutterReach,
-  isPlotComplete,
-  plotBonus,
-  plotTarget,
-  plotsOf,
-  trackOf,
-} from '../src/game/economy';
+import { bandPoints, buildCoins, capacity, cargoPoints, cargoTotal, isPlotComplete, plotBonus, plotTarget, plotsOf, trackOf } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
-import { stageCount } from '../src/game/layout';
-import { cargoDistance, cutterDistance, expandIfCleared, step, unload } from '../src/game/sim';
+import { isPlotInside, railOf } from '../src/game/rail';
+import { cargoDistance, cutterDistance, driveTap, growRail, step, unload } from '../src/game/sim';
 import type { GameState } from '../src/game/types';
 import { cellPoints, fieldFor } from '../src/game/worldgen';
 import { count, fresh, run } from './helpers';
@@ -29,25 +16,55 @@ function forestPoints(state: GameState): number {
   return pts;
 }
 
-/** Tebang seluruh pita (simulasikan pita sudah bersih). */
-function clearBand(state: GameState, band: number) {
-  for (const c of fieldFor(state.levelIndex).bandCells[band]) state.blocks[c] = 0;
+/** State baru dengan pemain menahan layar. */
+function driving() {
+  const g = fresh();
+  g.rt.drive.holding = true;
+  return g;
 }
 
-describe('pemotong', () => {
-  it('hanya memotong blok di sisi kiri (luar loop) dalam jangkauan lengan; hasil masuk gerbong muatan', () => {
+describe('kontrol', () => {
+  it('tanpa input kereta diam dan tidak ada yang terpotong', () => {
     const { state, rt } = fresh();
+    const d0 = state.train.distance;
+    const blocks = [...state.blocks];
+    const ev = run(state, rt, 5);
+    expect(state.train.distance).toBe(d0);
+    expect(state.blocks).toEqual(blocks);
+    expect(ev.length).toBe(0);
+  });
+
+  it('tap memajukan kereta sebentar lalu berhenti; tahan = jalan terus', () => {
+    const { state, rt } = fresh();
+    driveTap(rt);
+    run(state, rt, 3);
+    const tapped = state.train.distance;
+    expect(tapped).toBeGreaterThan(0.5 + 0.5);
+    run(state, rt, 2);
+    expect(state.train.distance).toBe(tapped);
+    rt.drive.holding = true;
+    run(state, rt, 2);
+    expect(state.train.distance).toBeGreaterThan(tapped + 5);
+  });
+});
+
+describe('pemotong', () => {
+  it('hanya menggerus blok di sisi kiri yang disentuh gerinda; hasil masuk gerbong muatan', () => {
+    const { state, rt } = driving();
     const before = [...state.blocks];
     const ev = run(state, rt, 4);
     expect(count(ev, 'cut')).toBeGreaterThan(0);
     expect(cargoTotal(state.train.cargo)).toBeGreaterThan(0);
     const f = fieldFor(0);
+    // Rel bergerak selama tes; semua blok yang tersentuh harus berada di baris terdepan pulau awal.
+    for (let c = 0; c < f.n; c++) if (state.blocks[c] !== before[c]) expect(f.band[c]).toBe(0);
+    const reach = BALANCE.cutter.side + BALANCE.cutter.reach;
     const t = trackOf(state);
     for (let c = 0; c < f.n; c++) {
-      if (state.blocks[c] === before[c]) continue;
+      if (state.blocks[c] <= 0 || state.blocks[c] === before[c]) continue;
       const cell = { x: f.x[c], z: f.z[c] };
       const { d, gap } = t.closestDistance(cell);
-      expect(gap).toBeLessThan(cutterReach(1) + 0.05);
+      expect(gap).toBeLessThan(reach + 0.05);
       const p = t.pointAt(d);
       const o = t.outwardAt(d);
       expect((cell.x - p.x) * o.x + (cell.z - p.z) * o.z).toBeGreaterThan(0);
@@ -55,7 +72,7 @@ describe('pemotong', () => {
   });
 
   it('satu pemotong mengerjakan satu blok sekaligus', () => {
-    const { state, rt } = fresh();
+    const { state, rt } = driving();
     state.train.cutters = [1, 1, 1];
     run(state, rt, 1);
     for (let i = 0; i < 60; i++) {
@@ -63,13 +80,12 @@ describe('pemotong', () => {
       step(state, rt, 1 / 30, []);
       const changed = state.blocks.filter((b, c) => b !== snap[c]).length;
       expect(changed).toBeLessThanOrEqual(3);
-      const live = rt.targets.filter((t) => t >= 0);
-      expect(new Set(live).size).toBe(live.length);
+      expect(rt.targets.length).toBe(3);
     }
   });
 
-  it('muatan tidak pernah melebihi kapasitas; saat penuh lengan ditarik dan hutan tidak berubah', () => {
-    const { state, rt } = fresh();
+  it('muatan tidak pernah melebihi kapasitas; saat penuh gerinda berhenti', () => {
+    const { state, rt } = driving();
     state.train.cutters = [3, 2, 2, 1];
     for (let i = 0; i < 1500; i++) {
       step(state, rt, 1 / 30, []);
@@ -94,11 +110,11 @@ describe('pemotong', () => {
   });
 
   it('hutan tidak tumbuh kembali', () => {
-    const { state, rt } = fresh();
+    const { state, rt } = driving();
     run(state, rt, 20);
     const cut = state.blocks.map((b, c) => (b === 0 ? c : -1)).filter((c) => c >= 0);
     expect(cut.length).toBeGreaterThan(0);
-    state.train.cutters = [];
+    rt.drive.holding = false;
     run(state, rt, 120);
     for (const c of cut) expect(state.blocks[c]).toBe(0);
   });
@@ -131,24 +147,25 @@ describe('stasiun & kota', () => {
     expect(count(ev, 'plotComplete')).toBe(1);
   });
 
-  it('bahan menunggu di gudang sampai distrik baru terbuka', () => {
-    const { state, rt } = fresh();
+  it('bahan menunggu di gudang sampai rel melewati kavling berikutnya', () => {
+    const { state } = fresh();
     const plots = plotsOf(0);
     for (const p of plots) if (p.district === 0) state.plots[p.index] = plotTarget(state, p.index);
     state.train.cargo = { wood: 12, stone: 0, gem: 0 };
     unload(state, []);
     expect(state.stock).toBe(12);
-    clearBand(state, 0);
+    const f = fieldFor(0);
+    for (let c = 0; c < f.n; c++) if (f.band[c] <= 1) state.blocks[c] = 0;
     const ev: GameEvent[] = [];
-    expect(expandIfCleared(state, rt, ev)).toBe(true);
+    expect(growRail(state, ev)).toBe(true);
     expect(state.stock).toBe(0);
-    const first = plots.find((p) => p.district === 1)!;
+    const first = plots.find((p) => p.district > 0 && isPlotInside(railOf(state), p.index))!;
     expect(state.plots[first.index]).toBe(12);
-    expect(ev.map((e) => e.type)).toEqual(['expand', 'deliver']);
+    expect(count(ev, 'deliver')).toBe(1);
   });
 
   it('uang hanya datang dari membangun', () => {
-    const { state, rt } = fresh();
+    const { state, rt } = driving();
     state.train.cutters = [2, 2, 1];
     const ev = run(state, rt, 90);
     const earned = ev.reduce((s, e) => s + (e.type === 'deliver' ? e.money : e.type === 'plotComplete' ? e.bonus : 0), 0);
@@ -157,43 +174,9 @@ describe('stasiun & kota', () => {
   });
 });
 
-describe('rel melebar otomatis', () => {
-  it('saat pita bersih: tahap naik, jalur rel baru kosong, stasiun tetap di depan/belakang kereta, muatan & pemotong tetap', () => {
-    const { state, rt } = fresh();
-    state.train.cutters = [2, 1];
-    run(state, rt, 3);
-    const cargo = { ...state.train.cargo };
-    const L0 = trackOf(state).length;
-    const frac = state.train.distance / L0;
-    clearBand(state, 0);
-    const ev: GameEvent[] = [];
-    step(state, rt, 1 / 30, ev);
-    expect(state.expandStage).toBe(1);
-    expect(count(ev, 'expand')).toBe(1);
-    expect(state.train.cargo).toEqual(cargo);
-    expect(state.train.cutters).toEqual([2, 1]);
-    expect(rt.freeze).toBeGreaterThan(0);
-    expect(state.train.distance / trackOf(state).length).toBeCloseTo(frac, 1);
-    const f = fieldFor(0);
-    for (let c = 0; c < f.n; c++) if (f.railStage[c] === 1) expect(state.blocks[c]).toBe(-1);
-  });
-
-  it('tidak melebar selama pita masih ada blok, dan berhenti di tahap terakhir', () => {
-    const { state, rt } = fresh();
-    expect(expandIfCleared(state, rt, [])).toBe(false);
-    const N = stageCount(LEVELS[0]);
-    for (let b = 0; b < N; b++) clearBand(state, b);
-    for (let s = 1; s < N; s++) {
-      expect(expandIfCleared(state, rt, [])).toBe(true);
-      expect(state.expandStage).toBe(s);
-    }
-    expect(expandIfCleared(state, rt, [])).toBe(false);
-  });
-});
-
 describe('kekekalan bahan & level selesai', () => {
   it('tidak ada bahan yang hilang: hutan + muatan + gudang + terpasang = total hasil hutan', () => {
-    const { state, rt } = fresh();
+    const { state, rt } = driving();
     state.train.cutters = [4, 3, 3, 2];
     const total = bandPoints(0).reduce((s, v) => s + v, 0);
     for (let sec = 0; sec < 240; sec++) {
@@ -204,15 +187,15 @@ describe('kekekalan bahan & level selesai', () => {
   });
 
   it('level selesai hanya saat kota jadi dan hutan bersih', () => {
-    const { state, rt } = fresh();
-    const N = stageCount(LEVELS[0]);
-    for (let b = 0; b < N; b++) clearBand(state, b);
-    for (let s = 1; s < N; s++) expandIfCleared(state, rt, []);
+    const { state } = fresh();
+    const f = fieldFor(0);
+    const alive = f.bandCells[f.bandCells.length - 1][0];
+    for (let c = 0; c < f.n; c++) if (state.blocks[c] > 0) state.blocks[c] = 0;
+    state.blocks[alive] = 1;
+    growRail(state, []);
     const last = state.plots.length - 1;
     state.plots = state.plots.map((_, i) => plotTarget(state, i));
     state.plots[last] -= 5;
-    const alive = fieldFor(0).bandCells[N - 1][0];
-    state.blocks[alive] = 1;
     state.train.cargo = { wood: 5, stone: 0, gem: 0 };
     unload(state, []);
     expect(state.plots.every((_, i) => isPlotComplete(state, i))).toBe(true);

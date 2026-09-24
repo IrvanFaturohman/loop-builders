@@ -3,6 +3,7 @@ import { BALANCE } from '../src/config/balance';
 import { addCutter, mergeCutters, nextProject, upgradeCapacity, upgradeSpeed } from '../src/game/actions';
 import { addCost, capacity, cutterDps, cutterReach, plotTarget, trainSpeed } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
+import { railOf } from '../src/game/rail';
 import { count, fresh, run } from './helpers';
 
 describe('pemotong & upgrade', () => {
@@ -57,9 +58,10 @@ describe('level berikutnya', () => {
     expect(state.money).toBe(500);
     expect(state.train.cutters).toEqual([1]);
     expect(state.speedLevel).toBe(1);
-    expect(state.expandStage).toBe(0);
+    expect(railOf(state).levelIndex).toBe(1);
     expect(state.stock).toBe(0);
     expect(state.plots.every((p) => p === 0)).toBe(true);
+    rt.drive.holding = true;
     const ev = run(state, rt, 6);
     expect(count(ev, 'cut')).toBeGreaterThan(0);
     expect(plotTarget(state, 0)).toBeGreaterThan(0);

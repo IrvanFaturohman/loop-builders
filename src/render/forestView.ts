@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BALANCE } from '../config/balance';
 import type { BlockKind, GameState } from '../game/types';
+import { isCellInside, type Rail } from '../game/rail';
 import { fieldFor, KINDS, type Field } from '../game/worldgen';
 import { cbox, ccyl, colored, mergeFlat, place } from './geom';
 import { SHARED } from './palette';
@@ -60,8 +61,8 @@ export class ForestView {
   private readonly anims = new Map<number, CellAnim>();
   private readonly dirty = new Set<number>();
   private first = true;
-  /** Pita di bawah indeks ini sudah menjadi lahan kota (tunggulnya disembunyikan). */
-  private cityStage = 0;
+  /** Sel yang sudah di belakang rel (lahan kota): tunggulnya disembunyikan. */
+  private inside: Uint8Array;
 
   constructor(levelIndex: number, soilColor: string) {
     const f = fieldFor(levelIndex);
@@ -70,6 +71,7 @@ export class ForestView {
     this.stumpSlot = new Int32Array(f.n).fill(-1);
     this.lastHp = new Float32Array(f.n).fill(NaN);
     this.jitter = new Float32Array(f.n * 3);
+    this.inside = new Uint8Array(f.n);
 
     // Tanah hutan (cokelat) — terlihat di sela pohon & bekas tebangan.
     const soil = new THREE.Mesh(new THREE.PlaneGeometry(f.half * 2 + 1, f.half * 2 + 1), new THREE.MeshStandardMaterial({ color: soilColor, roughness: 1 }));
@@ -84,12 +86,12 @@ export class ForestView {
       if (f.kind[c] < 0) continue;
       this.slot[c] = counts[f.kind[c]]++;
       this.stumpSlot[c] = stumpCount++;
-      // variasi deterministik: geser kecil, rotasi, skala
+      // Blok tersusun rapi dalam baris: tanpa geser, rotasi kelipatan 90°, variasi skala kecil.
       const h = Math.sin(c * 12.9898) * 43758.5453;
       const r = h - Math.floor(h);
-      this.jitter[c * 3] = (r - 0.5) * 0.14;
-      this.jitter[c * 3 + 1] = r * 6.28;
-      this.jitter[c * 3 + 2] = 0.9 + ((r * 7.3) % 1) * 0.2;
+      this.jitter[c * 3] = 0;
+      this.jitter[c * 3 + 1] = Math.floor(r * 4) * (Math.PI / 2);
+      this.jitter[c * 3 + 2] = 0.92 + ((r * 7.3) % 1) * 0.12;
     }
     KINDS.forEach((k, i) => {
       const mesh = new THREE.InstancedMesh(kindGeometry(k), SHARED.vertexStd, Math.max(1, counts[i]));
@@ -166,7 +168,7 @@ export class ForestView {
     this.meshes[k].instanceMatrix.needsUpdate = true;
     // tunggul terlihat saat blok sudah ditebang (dan tunas masih kecil)
     // Tunggul hilang begitu lahannya menjadi kota (pita di dalam rel sekarang).
-    const stump = hp === 0 && this.field.band[c] >= this.cityStage && !(anim?.kind === 'fall' && anim.t > 0.2);
+    const stump = hp === 0 && !this.inside[c] && !(anim?.kind === 'fall' && anim.t > 0.2);
     _p.set(f.x[c] + jx, 0, f.z[c] - jx * 0.6);
     _q.setFromAxisAngle(_s.set(0, 1, 0), rot);
     _s.setScalar(stump ? js : 0.0001);
@@ -212,11 +214,17 @@ export class ForestView {
     return felled;
   }
 
-  /** Dipanggil World saat tanah kota tumbuh (setelah morph rel). */
-  setCityStage(stage: number): void {
-    if (stage === this.cityStage) return;
-    this.cityStage = stage;
-    for (let c = 0; c < this.field.n; c++) if (this.field.kind[c] >= 0) this.dirty.add(c);
+  /** Dipanggil World tiap rel maju: tunggul yang kini di belakang rel menghilang. */
+  setRail(rail: Rail): void {
+    const f = this.field;
+    for (let c = 0; c < f.n; c++) {
+      if (f.kind[c] < 0) continue;
+      const v = isCellInside(rail, c) ? 1 : 0;
+      if (v !== this.inside[c]) {
+        this.inside[c] = v;
+        this.dirty.add(c);
+      }
+    }
   }
 
   dispose(): void {

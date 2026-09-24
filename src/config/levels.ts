@@ -1,11 +1,11 @@
 import type { LevelDefinition, LotDef } from '../game/types';
 
 /**
- * Data level. Tiap level: pulau hutan dengan rel cincin di sekeliling alun-alun tengah.
- * Tahap k = rel cincin ke-k; pemotong membersihkan pita hutan di luarnya, lalu rel melebar
- * sendiri ke pita berikutnya. Distrik k (daftar bangunan) terbuka di tahap k: distrik 0 di
- * alun-alun, distrik k di lahan bekas pita k-1. Biaya tiap bangunan = porsi bobotnya dari hasil
- * pita hutan distrik itu, jadi kota selesai tepat saat hutan habis.
+ * Data level. Tiap level: pulau hutan persegi yang tersusun dalam baris-baris di sekeliling
+ * alun-alun tengah. Rel mengikuti tepi lahan yang sudah bersih. Pita k (zona jenis blok,
+ * lebar `ringStep`) membiayai distrik k: distrik 0 di alun-alun, distrik k di cincin kavling
+ * bekas pita k-1, dan tiap kavling terbuka begitu rel melewatinya. Biaya tiap bangunan = porsi
+ * bobotnya dari hasil pita hutan distrik itu, jadi kota selesai tepat saat hutan habis.
  * Untuk menambah level: salin satu objek di LEVELS lalu ubah distrik, bobot, pita, dan seed.
  */
 
@@ -17,9 +17,8 @@ export const LEVELS: LevelDefinition[] = [
     name: 'Hutan Cemara',
     theme: 'forest',
     material: 'wood',
-    ringStart: 4.25,
+    ringStart: 4.5,
     ringStep: 2.5,
-    cornerRadius: 1.5,
     districts: [
       { name: 'Alun-alun', lots: [L('rumah-kayu', 0), L('warung', 0), L('rumah-papan', 0), L('rumah-kayu', 1)] },
       {
@@ -74,9 +73,8 @@ export const LEVELS: LevelDefinition[] = [
     name: 'Lembah Batu',
     theme: 'meadow',
     material: 'brick',
-    ringStart: 4.25,
+    ringStart: 4.5,
     ringStep: 2.5,
-    cornerRadius: 1.5,
     districts: [
       { name: 'Alun-alun Batu', lots: [L('rumah-bata', 0), L('toko-roti', 0), L('ruko', 0), L('rumah-bata', 1)] },
       {

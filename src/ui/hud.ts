@@ -3,7 +3,6 @@ import { LEVELS } from '../config/levels';
 import { canAddCutter, canMerge, canUpgradeCapacity, canUpgradeSpeed, isLastLevel } from '../game/actions';
 import {
   addCost,
-  bandRemaining,
   buildingsDone,
   capacity,
   capacityCost,
@@ -12,13 +11,12 @@ import {
   findMergePair,
   forestCleared,
   isPlotComplete,
+  isPlotUnlocked,
   levelDef,
   mergeCost,
   plotsOf,
   speedCost,
 } from '../game/economy';
-import { stageCount } from '../game/layout';
-import { fieldFor } from '../game/worldgen';
 import type { GameState, Runtime } from '../game/types';
 import { coin, fmt, fmtTime } from './format';
 
@@ -56,7 +54,6 @@ export class Hud {
   private readonly pStage = $('p-stage');
   private readonly hintEl = $('hint');
   private readonly boostEl = $('boost');
-  private readonly boostFill = $('boost-fill');
   private readonly cargoEl = $('cargo');
   private readonly cargoIcon = $('cargo-icon');
   private readonly cargoFill = $('cargo-fill');
@@ -180,15 +177,15 @@ export class Hud {
     this.set('pcount', this.pCount, `<b>${b.done}</b>/${b.total} bangunan`);
     this.pFill.style.width = `${((b.done / Math.max(1, b.total)) * 100).toFixed(1)}%`;
     const plots = plotsOf(state.levelIndex);
-    const band = state.expandStage;
-    const bandCells = fieldFor(state.levelIndex).bandCells[band].length;
-    const bandPct = Math.floor((1 - bandRemaining(state, band) / Math.max(1, bandCells)) * 100);
     let stage: string;
     if (state.completed) stage = `<b>Selesai!</b> ${b.total} bangunan berdiri`;
     else {
-      const dp = plots.filter((p) => p.district === band);
+      // Distrik aktif = distrik terluar yang sudah punya kavling terbuka.
+      let di = 0;
+      for (const p of plots) if (p.district > di && isPlotUnlocked(state, p.index)) di = p.district;
+      const dp = plots.filter((p) => p.district === di);
       const done = dp.filter((p) => isPlotComplete(state, p.index)).length;
-      stage = `<b>${level.districts[band].name}</b> · ${done}/${dp.length} jadi${state.stock > 0 ? ` · gudang ${fmt(state.stock)}` : ''}`;
+      stage = `<b>${level.districts[di].name}</b> · ${done}/${dp.length} jadi${state.stock > 0 ? ` · gudang ${fmt(state.stock)}` : ''}`;
     }
     this.set('pstage', this.pStage, stage);
 
@@ -208,11 +205,8 @@ export class Hud {
     this.cls(this.cargoIcon, 'stone', res === 'stone');
     this.cargoEl.hidden = state.completed;
 
-    // Boost
-    const bs = rt.boost;
-    this.cls(this.boostEl, 'show', !state.completed && (bs.energy < 0.995 || bs.holding));
-    this.cls(this.boostEl, 'tired', bs.exhausted);
-    this.boostFill.style.width = `${(bs.energy * 100).toFixed(1)}%`;
+    // Meter boost tidak dipakai lagi: kereta jalan selama layar ditahan.
+    this.cls(this.boostEl, 'show', false);
 
     // Tombol utama
     const full = state.train.cutters.length >= BALANCE.maxCutters;
@@ -227,14 +221,14 @@ export class Hud {
     this.priceBtn('speed', this.speedCostEl, this.btnSpeed, speedCost(state), canUpgradeSpeed(state).ok, locked);
     this.priceBtn('cap', this.capacityCostEl, this.btnCapacity, capacityCost(state), canUpgradeCapacity(state).ok, locked);
 
-    // Panel progres: rel melebar sendiri saat pita hutan di luar rel bersih
-    const N = stageCount(level);
-    const last = band >= N - 1;
+    // Panel progres: hutan yang sudah bersih & kota
+    const cleared = Math.floor(forestCleared(state) * 100);
+    const driving = rt.drive.v > 0.05;
     this.set(
       'stinfo',
       this.stInfo,
-      `<div class="st-name">Cincin ${band + 1}/${N} · ${last ? 'cincin terakhir' : 'tebang hutan di luar rel'}</div>` +
-        `<div class="st-bar"><span class="track"><i style="width:${bandPct}%"></i></span>${last ? `Hutan ${bandPct}%` : `${bandPct}% → rel melebar`}</div>`,
+      `<div class="st-name">${driving ? 'Rel maju mengikuti hutan' : 'Tahan layar untuk jalan'}</div>` +
+        `<div class="st-bar"><span class="track"><i style="width:${cleared}%"></i></span>Hutan ${cleared}% bersih</div>`,
     );
     this.set('stx', this.stExpand, `Kota<small>${Math.floor(cityProgress(state) * 100)}%</small>`);
     this.cls(this.stExpand, 'city', true);

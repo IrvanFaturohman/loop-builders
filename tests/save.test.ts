@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addCutter } from '../src/game/actions';
-import { plotTarget } from '../src/game/economy';
-import { expandIfCleared } from '../src/game/sim';
+import { capacity, plotTarget } from '../src/game/economy';
+import { growRail } from '../src/game/sim';
 import { deserialize, loadGame, SAVE_KEY, saveGame, serialize } from '../src/game/save';
 import { fieldFor } from '../src/game/worldgen';
 import { fresh, run } from './helpers';
@@ -34,11 +34,10 @@ describe('save/load', () => {
     state.money = 300;
     addCutter(state, []);
     for (const c of fieldFor(0).bandCells[0]) state.blocks[c] = 0;
-    expandIfCleared(state, rt, []);
-    rt.freeze = 0;
+    expect(growRail(state, [])).toBe(true);
     state.stock = 7;
+    rt.drive.holding = true;
     run(state, rt, 23.7);
-    expect(state.expandStage).toBe(1);
     const s2 = deserialize(serialize(state))!;
     expect(s2).not.toBeNull();
     const { blocks: b1, ...rest1 } = state;
@@ -59,7 +58,6 @@ describe('save/load', () => {
 
   it('level selesai pulih dalam keadaan selesai', () => {
     const { state } = fresh();
-    state.expandStage = 3;
     state.blocks = state.blocks.map((b) => (b > 0 ? 0 : b));
     state.plots = state.plots.map((_, i) => plotTarget(state, i));
     state.completed = true;
@@ -80,7 +78,7 @@ describe('save/load', () => {
     const forest = f.bandCells[0][0];
     state.blocks[forest] = 999;
     const s2 = deserialize(serialize(state))!;
-    expect(s2.train.cargo.wood).toBe(20);
+    expect(s2.train.cargo.wood).toBe(capacity(s2));
     expect(s2.train.cutters).toEqual([8, 1]);
     expect(s2.plots[lastPlot]).toBe(0);
     expect(s2.plots[0]).toBe(plotTarget(s2, 0));

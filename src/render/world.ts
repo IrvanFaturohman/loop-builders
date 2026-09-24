@@ -2,10 +2,10 @@ import * as THREE from 'three';
 import { BALANCE } from '../config/balance';
 import { LEVELS } from '../config/levels';
 import { completedModuleCount } from '../game/building';
-import { capacity, cargoTotal, isPlotComplete, isPlotUnlocked, plotProject, plotTarget, plotsOf, trackFor, trainSpeed } from '../game/economy';
+import { capacity, cargoTotal, isPlotComplete, isPlotUnlocked, plotProject, plotTarget, plotsOf, trainSpeed } from '../game/economy';
 import type { GameEvent } from '../game/events';
-import { stageBounds, stationPoint, type ResolvedPlot } from '../game/layout';
-import { stageMapping } from '../game/tracks';
+import { islandBounds, type ResolvedPlot } from '../game/layout';
+import { railMapping, railOf, type Rail } from '../game/rail';
 import type { GameState, LevelDefinition, Runtime } from '../game/types';
 import { fieldFor, KINDS } from '../game/worldgen';
 import { fmt } from '../ui/format';
@@ -34,7 +34,8 @@ interface Float {
   amount: number;
 }
 
-const EXPAND_MORPH = 1.15;
+/** Durasi morph rel setiap kali maju (kecil & sering). */
+const RAIL_MORPH = 0.3;
 const MAX_FLOATS = 16;
 /** Leaf/serpihan per jenis blok saat tumbang. */
 const CHIP_COLORS: Record<string, string> = { tree: '#6ccf58', treeGold: '#ffd24a', treeRed: '#f06a55', rock: '#b7bdc6', crystal: '#ff7a8f' };
@@ -51,11 +52,11 @@ const DEPOT = new THREE.Vector3(0, 1.25, -1.5);
 function stationGeometry(): THREE.BufferGeometry {
   const post = '#5b6a80';
   return mergeFlat([
-    // kanopi di atas rel
-    ...[-0.95, 0.95].flatMap((x) => [-0.78, 0.78].map((z) => ccyl(0.06, 1.4, post, 8, x, 0.7, z))),
-    cbox(2.3, 0.1, 1.9, '#e0463a', 0, 1.45, 0, 0.04),
-    cbox(2.1, 0.06, 1.7, '#f6e7c8', 0, 1.38, 0, 0.03),
-    cbox(0.9, 0.34, 0.06, '#2f8f8c', 0, 1.7, 0.2, 0.04),
+    // kanopi dari sisi dalam, menjorok di atas rel (tidak menutupi baris hutan di sisi luar)
+    ...[-0.95, 0.95].map((x) => ccyl(0.06, 1.4, post, 8, x, 0.7, -0.78)),
+    cbox(2.3, 0.1, 1.35, '#e0463a', 0, 1.45, -0.2, 0.04),
+    cbox(2.1, 0.06, 1.2, '#f6e7c8', 0, 1.38, -0.2, 0.03),
+    cbox(0.9, 0.34, 0.06, '#2f8f8c', 0, 1.7, -0.3, 0.04),
     // peron & gudang di sisi dalam
     cbox(2.2, 0.12, 0.5, '#d9d4c8', 0, 0.06, -0.72, 0.03),
     cbox(1.9, 0.12, 1.3, '#d9d4c8', 0, 0.06, -1.5, 0.05),
@@ -89,12 +90,10 @@ export class World {
   private wagonLabels: WorldLabel[] = [];
   private env: EnvironmentBuild | null = null;
   private floats: Float[] = [];
-  private revealDistrict = -1;
-  private revealTimer = 0;
   private smokeTimer = 0;
   private city!: CityView;
-  private cityTimer = 0;
-  private cityTarget = 0;
+  private rail!: Rail;
+  private readonly openDistricts = new Set<number>();
   private sparkTimer = 0;
   private readonly aimPool: THREE.Vector3[] = [];
   private width = 1;
@@ -147,7 +146,8 @@ export class World {
     this.scene.fog = new THREE.Fog(palette.fog, 40, 110);
 
     // Rel
-    this.track = new TrackView(palette, trackFor(state.levelIndex, state.expandStage), [], { gate: false, style: 'rail' });
+    this.rail = railOf(state);
+    this.track = new TrackView(palette, this.rail.track, [], { gate: false, style: 'rail' });
     this.levelRoot.add(this.track.group);
 
     // Hutan
@@ -155,15 +155,17 @@ export class World {
     this.levelRoot.add(this.forest.group);
 
     // Tanah kota di dalam rel (tumbuh tiap rel melebar) & stasiun di rel
-    this.city = new CityView(this.level, state.expandStage);
+    this.city = new CityView(this.level, this.rail);
     this.levelRoot.add(this.city.group);
-    this.forest.setCityStage(state.expandStage);
+    this.forest.setRail(this.rail);
+    this.openDistricts.clear();
+    this.plotsDef.forEach((p, i) => isPlotUnlocked(state, i) && this.openDistricts.add(p.district));
     this.station = new THREE.Group();
     const sm = new THREE.Mesh(stationGeometry(), SHARED.vertexStd);
     sm.castShadow = true;
     sm.receiveShadow = true;
     this.station.add(sm);
-    this.placeStation(state.expandStage, true);
+    this.placeStation();
     this.levelRoot.add(this.station);
 
     // Kavling (muncul saat distriknya terbuka)
@@ -213,15 +215,17 @@ export class World {
     this.rig.update(10);
   }
 
-  /** Stasiun di rel sekarang (tengah sisi bawah); ikut bergeser keluar saat rel melebar. */
-  private placeStation(stage: number, immediate: boolean, dt = 0): void {
-    const p = stationPoint(this.level, stage);
-    this.station.position.x = p.x;
-    this.station.position.z = immediate ? p.z : THREE.MathUtils.damp(this.station.position.z, p.z, 2.6, dt);
+  /** Stasiun di titik rel jarak 0 (tengah sisi bawah); ikut maju & miring bersama rel (termasuk morph). */
+  private placeStation(): void {
+    this.track.pointAt(0, _v);
+    this.station.position.set(_v.x, 0, _v.z);
+    this.track.tangentAt(0, _v2);
+    this.station.rotation.y = Math.atan2(-_v2.z, _v2.x) - Math.PI;
   }
 
   private depot(out: THREE.Vector3): THREE.Vector3 {
-    return out.copy(DEPOT).add(this.station.position);
+    this.station.updateMatrixWorld();
+    return this.station.localToWorld(out.copy(DEPOT));
   }
 
   private disposeLevel(): void {
@@ -240,7 +244,6 @@ export class World {
     this.scene.remove(this.levelRoot);
     this.levelRoot = new THREE.Group();
     this.scene.add(this.levelRoot);
-    this.revealDistrict = -1;
   }
 
   // ---------------------------------------------------------------------------
@@ -270,7 +273,8 @@ export class World {
   }
 
   private frameOverview(state: GameState): void {
-    const b = stageBounds(this.level, state.expandStage);
+    const b = this.rail.track.bounds();
+    void state;
     this.rig.fit(this.regionPoints(b.minX - 1.5, b.maxX + 1.5, b.minZ - 1.5, b.maxZ + 1.5), this.safe, { ease: 2 });
   }
 
@@ -365,7 +369,7 @@ export class World {
           break;
         }
         case 'projectComplete': {
-          const b = stageBounds(this.level, state.expandStage);
+          const b = islandBounds(this.level);
           for (let i = 0; i < 4; i++) {
             const p = new THREE.Vector3(THREE.MathUtils.lerp(b.minX, b.maxX, Math.random()), 3, THREE.MathUtils.lerp(b.minZ, b.maxZ, Math.random()));
             setTimeout(() => this.effects.confettiBurst(p, 70), i * 250);
@@ -385,25 +389,31 @@ export class World {
         case 'capacity':
           this.effects.sparkle(this.train.locoPosition(new THREE.Vector3()).setY(1), 14, ['#7cf0b8', '#ffffff', '#ffd34a']);
           break;
-        case 'expand': {
-          const from = trackFor(state.levelIndex, e.from);
-          const to = trackFor(state.levelIndex, e.to);
-          this.track.startMorph(from, to, stageMapping(state.levelIndex, e.from, e.to).inverse(), EXPAND_MORPH);
-          this.revealDistrict = e.to;
-          this.city.setStage(e.to, EXPAND_MORPH);
-          this.cityTimer = EXPAND_MORPH;
-          this.cityTarget = e.to;
-          const sp = stationPoint(this.level, e.to);
-          setTimeout(() => this.floatText(`${this.level.districts[e.to].name} terbuka!`, new THREE.Vector3(sp.x, 2.6, sp.z - 2.5), 'float-stage'), EXPAND_MORPH * 1000);
-          this.revealTimer = EXPAND_MORPH + 0.05;
-          // Pohon di jalur rel baru terlempar keluar.
-          const f = fieldFor(state.levelIndex);
-          e.cleared.forEach((c, i) => {
-            if (i % 2) return;
-            setTimeout(() => this.effects.puff(new THREE.Vector3(f.x[c], 0.5, f.z[c]), { count: 3, size: 0.25, spread: 1.6, up: 1.6, color: '#6ccf58' }), Math.min(1000, i * 12));
-          });
-          this.overviewMode = false;
-          this.manualIdle = 99;
+        case 'railGrow': {
+          const to = railOf(state);
+          this.track.startMorph(this.rail.track, to.track, railMapping(to, this.rail), RAIL_MORPH);
+          this.rail = to;
+          this.city.setRail(to);
+          this.forest.setRail(to);
+          break;
+        }
+        case 'harvest': {
+          // Blok terkurung dibongkar pekerja kota: debu + bahan terbang ke gudang stasiun.
+          const pos = this.forest.cellPos(e.cell, new THREE.Vector3());
+          this.effects.puff(pos, { count: 5, size: 0.28, spread: 1.4, up: 1.4, color: '#d9d4c8' });
+          this.effects.fly(this.itemKind, pos, this.depot(new THREE.Vector3()), { dur: 0.6, height: 2 });
+          break;
+        }
+        case 'plotOpen': {
+          const pv = this.plots[e.plot];
+          pv.setVisible(true, true);
+          const p = this.plotsDef[e.plot];
+          this.effects.sparkle(new THREE.Vector3(p.pos.x, 0.8, p.pos.z), 12, ['#fff6c2', '#ffffff', '#9be8ff']);
+          this.effects.puff(new THREE.Vector3(p.pos.x, 0.2, p.pos.z), { count: 6, size: 0.28, spread: 1.3 });
+          if (!this.openDistricts.has(p.district)) {
+            this.openDistricts.add(p.district);
+            this.floatText(`${this.level.districts[p.district].name} terbuka!`, new THREE.Vector3(p.pos.x, 2.4, p.pos.z), 'float-stage');
+          }
           break;
         }
         default:
@@ -471,21 +481,17 @@ export class World {
 
   update(dt: number, state: GameState, rt: Runtime): void {
     this.track.update(dt);
-    const frozen = rt.freeze > 0 || state.completed;
-    const speed = frozen ? 0 : trainSpeed(state) * rt.boost.mult * 0.3;
-    this.syncTrain(state, dt, speed, rt.boost.mult, rt.targets);
-    if (!frozen) this.cutSparks(state, rt, dt);
+    const moving = !state.completed && rt.drive.v > 0.05;
+    const speed = moving ? trainSpeed(state) * rt.drive.v * 0.3 : 0;
+    this.syncTrain(state, dt, speed, 1 + rt.drive.v * 0.3, rt.targets);
+    if (moving) this.cutSparks(state, rt, dt);
     this.forest.update(dt, state);
     this.city.update(dt);
-    if (this.cityTimer > 0) {
-      this.cityTimer -= dt;
-      if (this.cityTimer <= 0) this.forest.setCityStage(this.cityTarget);
-    }
 
     // Asap lokomotif
     this.smokeTimer -= dt;
-    if (!frozen && this.smokeTimer <= 0) {
-      this.smokeTimer = rt.boost.mult > 1.2 ? 0.12 : 0.3;
+    if (moving && this.smokeTimer <= 0) {
+      this.smokeTimer = 0.18;
       this.effects.puff(this.train.chimney(_v), { count: 1, size: 0.2, spread: 0.2, up: 1.3, life: 0.9, color: '#f4f4f4' });
     }
 
@@ -510,19 +516,15 @@ export class World {
       for (let k = 1; k <= 8; k++) l.setClass(`lv${k}`, k === lv);
     });
 
-    // Stasiun ikut pindah ke rel baru; bergoyang saat menerima muatan
-    this.placeStation(state.expandStage, false, dt);
+    // Stasiun ikut maju bersama rel; bergoyang saat menerima muatan
+    this.placeStation();
     this.stationBounce = Math.max(0, this.stationBounce - dt * 3);
     const sb = Math.sin(this.stationBounce * Math.PI) * 0.08;
     this.station.scale.set(1 + sb * 0.5, 1 - sb + sb * 1.4, 1 + sb * 0.5);
 
     // Kavling
-    if (this.revealTimer > 0) {
-      this.revealTimer -= dt;
-      if (this.revealTimer <= 0) this.revealDistrict = -1;
-    }
     this.plots.forEach((pv, i) => {
-      const open = isPlotUnlocked(state, i) && this.plotsDef[i].district !== this.revealDistrict;
+      const open = isPlotUnlocked(state, i);
       pv.setVisible(open, true);
       pv.update(dt);
       const lbl = this.plotLabels[i];

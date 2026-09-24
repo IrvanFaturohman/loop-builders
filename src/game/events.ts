@@ -21,8 +21,12 @@ export type GameEvent =
   | { type: 'merge'; a: number; b: number; level: number }
   | { type: 'speed'; level: number }
   | { type: 'capacity'; level: number }
-  /** Rel melebar otomatis; distrik `to` terbuka. */
-  | { type: 'expand'; from: number; to: number; cleared: number[] }
+  /** Rel maju mengikuti baris hutan terdepan (bentuk baru: railOf(state)). */
+  | { type: 'railGrow' }
+  /** Blok terkurung di dalam rel dibongkar otomatis; bahannya masuk gudang. */
+  | { type: 'harvest'; cell: number; points: number }
+  /** Kavling kini di dalam rel dan siap dibangun. */
+  | { type: 'plotOpen'; plot: number }
   | { type: 'nextProject'; levelIndex: number };
 
 export type EventSink = GameEvent[];

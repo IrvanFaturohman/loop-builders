@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { getBuilding } from '../src/config/buildings';
 import { LEVELS } from '../src/config/levels';
 import { completedModuleCount } from '../src/game/building';
-import { bandPoints, cutterReach, plotTargets, plotsOf, trackFor } from '../src/game/economy';
-import { LOT_D, LOT_W, RAIL_CLEAR, stageCount, stationPoint, type ResolvedPlot } from '../src/game/layout';
+import { bandPoints, plotTargets, plotsOf } from '../src/game/economy';
+import { districtCount, LOT_D, LOT_W, type ResolvedPlot } from '../src/game/layout';
+import { isPlotInside, railOf, updateRail } from '../src/game/rail';
+import { createNewGame, setupLevel } from '../src/game/state';
 import type { Vec2 } from '../src/game/types';
 import { fieldFor, initialBlocks } from '../src/game/worldgen';
 
@@ -36,89 +38,45 @@ function overlaps(a: Vec2[], b: Vec2[]): boolean {
   return true;
 }
 
-function inside(poly: Vec2[], x: number, z: number): boolean {
-  for (let i = 0; i < poly.length; i++) {
-    const p = poly[i];
-    const q = poly[(i + 1) % poly.length];
-    if ((q.x - p.x) * (z - p.z) - (q.z - p.z) * (x - p.x) < 0) return false;
-  }
-  return true;
-}
-
-function perimeter(poly: Vec2[], step = 0.1): Vec2[] {
-  const out: Vec2[] = [];
-  for (let i = 0; i < poly.length; i++) {
-    const p = poly[i];
-    const q = poly[(i + 1) % poly.length];
-    const n = Math.ceil(Math.hypot(q.x - p.x, q.z - p.z) / step);
-    for (let k = 0; k < n; k++) out.push({ x: p.x + ((q.x - p.x) * k) / n, z: p.z + ((q.z - p.z) * k) / n });
-  }
-  return out;
+function levelState(li: number) {
+  const state = createNewGame();
+  if (li > 0) setupLevel(state, li, 0);
+  return state;
 }
 
 describe('tata letak & hutan', () => {
   LEVELS.forEach((level, li) => {
-    const N = stageCount(level);
+    const N = districtCount(level);
 
-    it(`${level.id}: rel cincin searah jarum jam, makin panjang, stasiun di jarak 0`, () => {
-      let prev = 0;
-      for (let s = 0; s < N; s++) {
-        const t = trackFor(li, s);
-        expect(t.clockwise).toBe(true);
-        expect(t.length).toBeGreaterThan(prev + 5);
-        prev = t.length;
-        const st = stationPoint(level, s);
-        const p0 = t.pointAt(0);
-        expect(Math.hypot(p0.x - st.x, p0.z - st.z)).toBeLessThan(1e-6);
-      }
-    });
-
-    it(`${level.id}: setiap blok terjangkau lengan pemotong Lv1 di sisi kiri rel pitanya`, () => {
-      const f = fieldFor(li);
-      const reach = cutterReach(1);
-      let blocks = 0;
-      for (let c = 0; c < f.n; c++) {
-        if (f.kind[c] < 0) continue;
-        blocks++;
-        const b = f.band[c];
-        expect(b >= 0 && b < N, `sel ${c} di luar pita`).toBe(true);
-        const t = trackFor(li, b);
-        const cell = { x: f.x[c], z: f.z[c] };
-        const { d, gap } = t.closestDistance(cell);
-        expect(gap, `sel ${c} pita ${b}`).toBeLessThan(reach - 0.05);
-        const p = t.pointAt(d);
-        const o = t.outwardAt(d);
-        expect((cell.x - p.x) * o.x + (cell.z - p.z) * o.z).toBeGreaterThan(0);
-      }
-      expect(blocks).toBeGreaterThan(300);
-    });
-
-    it(`${level.id}: rel berikutnya selalu di lahan pita sebelumnya; rel pertama & alun-alun bersih`, () => {
+    it(`${level.id}: hutan rapat berbaris tanpa celah; baris pertama tepat di luar kota awal`, () => {
       const f = fieldFor(li);
       const hp = initialBlocks(li);
+      let blocks = 0;
       for (let c = 0; c < f.n; c++) {
-        const rs = f.railStage[c];
-        if (rs === 0 || f.band[c] < 0) expect(hp[c]).toBe(-1);
-        if (rs >= 1 && f.kind[c] >= 0) expect(f.band[c]).toBe(rs - 1);
+        const inIsland = f.band[c] >= 0 && f.band[c] < N;
+        expect(f.kind[c] >= 0, `sel ${c}`).toBe(inIsland);
+        if (inIsland) blocks++;
+        else expect(hp[c]).toBe(-1);
       }
-      const center = Math.floor(f.half) * f.cols + Math.floor(f.half);
-      expect(hp[center]).toBe(-1);
+      expect(blocks).toBeGreaterThan(500);
+      // Sisi bawah yang lurus: baris-baris sejajar rel, baris pertama di z = 5.5.
+      for (let x = -1.5; x <= 1.5; x++) {
+        const at = (z: number) => f.kind[(z + f.half - 0.5) * f.cols + (x + f.half - 0.5)];
+        expect(at(4.5)).toBe(-1);
+        for (const z of [5.5, 6.5, 7.5, 8.5]) expect(at(z)).toBeGreaterThanOrEqual(0);
+      }
     });
 
-    it(`${level.id}: kavling tidak saling menimpa, jauh dari rel, dan di lahan yang sudah bersih`, () => {
-      const f = fieldFor(li);
+    it(`${level.id}: kavling tidak saling menimpa; alun-alun sudah di dalam rel awal, sisanya terbuka saat hutan habis`, () => {
       const plots = plotsOf(li);
       const lots = plots.map(lotCorners);
       for (let i = 0; i < lots.length; i++)
         for (let j = i + 1; j < lots.length; j++) expect(overlaps(lots[i], lots[j]), `kavling ${i} & ${j}`).toBe(false);
-      plots.forEach((p, i) => {
-        const edge = perimeter(lots[i]);
-        for (let s = p.district; s < N; s++) {
-          const t = trackFor(li, s);
-          for (const q of edge) expect(t.closestDistance(q).gap, `kavling ${i} vs rel ${s}`).toBeGreaterThan(RAIL_CLEAR);
-        }
-        for (let c = 0; c < f.n; c++) if (inside(lots[i], f.x[c], f.z[c])) expect(f.band[c], `kavling ${i} sel ${c}`).toBeLessThan(p.district);
-      });
+      const state = levelState(li);
+      for (const p of plots) expect(isPlotInside(railOf(state), p.index), `kavling ${p.index}`).toBe(p.district === 0);
+      state.blocks = state.blocks.map((b) => (b > 0 ? 0 : b));
+      updateRail(state);
+      for (const p of plots) expect(isPlotInside(railOf(state), p.index), `kavling ${p.index}`).toBe(true);
       for (let d = 0; d < N; d++) expect(plots.some((p) => p.district === d)).toBe(true);
     });
 

@@ -1,10 +1,10 @@
 import { plotsOfLevel } from './layout';
-import { trackFor } from './tracks';
+import { railOf, resetRail } from './rail';
 import type { GameState, Runtime, TutorialFlags } from './types';
 import { initialBlocks } from './worldgen';
 
 export function defaultTutorial(): TutorialFlags {
-  return { boost: false, add: false, merge: false, capacity: false, speed: false };
+  return { drive: false, add: false, merge: false, capacity: false, speed: false };
 }
 
 /** State awal permainan baru (level pertama). */
@@ -17,7 +17,6 @@ export function createNewGame(): GameState {
     plots: [],
     stock: 0,
     completed: false,
-    expandStage: 0,
     train: { distance: 0, cutters: [1], cargo: { wood: 0, stone: 0, gem: 0 } },
     speedLevel: 1,
     capacityLevel: 1,
@@ -31,7 +30,7 @@ export function createNewGame(): GameState {
 }
 
 /**
- * Menyiapkan level baru: hutan utuh, rel cincin pertama, kereta dengan satu pemotong Lv1.
+ * Menyiapkan level baru: hutan utuh, rel di baris terdepan, kereta dengan satu pemotong Lv1.
  * Uang, tutorial, dan statistik total dibawa dari level sebelumnya; upgrade kereta di-reset
  * (seperti pindah pulau di Train Miner).
  */
@@ -42,21 +41,22 @@ export function setupLevel(state: GameState, levelIndex: number, cycle: number):
   state.plots = plotsOfLevel(levelIndex).map(() => 0);
   state.stock = 0;
   state.completed = false;
-  state.expandStage = 0;
   state.speedLevel = 1;
   state.capacityLevel = 1;
   state.addsPurchased = 0;
   state.mergesPurchased = 0;
   state.stats.levelTime = 0;
   state.stats.lastCompletionBonus = 0;
+  // Rel dihitung sekarang dari hutan utuh, supaya perubahan blok berikutnya terdeteksi sebagai rel maju.
+  resetRail(state);
+  railOf(state);
   // Mulai tepat setelah stasiun.
-  state.train = { distance: trackFor(levelIndex, 0).wrap(0.5), cutters: [1], cargo: { wood: 0, stone: 0, gem: 0 } };
+  state.train = { distance: 0.5, cutters: [1], cargo: { wood: 0, stone: 0, gem: 0 } };
 }
 
 export function createRuntime(): Runtime {
   return {
-    boost: { energy: 1, holding: false, tapTimer: 0, exhausted: false, rechargeDelay: 0, mult: 1, usedSeconds: 0 },
-    freeze: 0,
+    drive: { holding: false, tapTimer: 0, v: 0, usedSeconds: 0 },
     cutHeat: 0,
     fullTime: 0,
     targets: [],

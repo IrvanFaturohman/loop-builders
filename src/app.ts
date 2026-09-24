@@ -4,7 +4,7 @@ import { addCutter, mergeCutters, nextProject, upgradeCapacity, upgradeSpeed, ty
 import { levelDef } from './game/economy';
 import type { GameEvent } from './game/events';
 import { clearSave, loadGame, loadSettings, saveGame, saveSettings, type Settings } from './game/save';
-import { boostHold, boostTap, step } from './game/sim';
+import { driveHold, step } from './game/sim';
 import { createNewGame, createRuntime } from './game/state';
 import type { GameState, Runtime } from './game/types';
 import { World } from './render/world';
@@ -16,7 +16,8 @@ interface Touch {
   y: number;
   sx: number;
   sy: number;
-  boost: boolean;
+  /** Sentuhan ini sedang menjalankan kereta. */
+  drive: boolean;
   panning: boolean;
   consumed: boolean;
 }
@@ -70,7 +71,7 @@ export class App {
       },
       toggleSound: () => this.setSound(this.settings.muted),
       openSettings: () => {
-        this.releaseBoost();
+        this.releaseDrive();
         this.hud.showSettings(true);
       },
       closeSettings: () => this.hud.showSettings(false),
@@ -122,8 +123,8 @@ export class App {
     this.world.update(dt, this.state, this.rt);
     this.hud.update(this.state, this.rt, { muted: this.settings.muted, overview: this.world.overviewMode }, dt);
     this.updateTutorial();
-    const running = !this.state.completed && this.rt.freeze <= 0 && !document.hidden;
-    this.sfx.setEngine(this.rt.boost.mult, running);
+    const running = !this.state.completed && !document.hidden;
+    this.sfx.setEngine(1 + this.rt.drive.v * 0.6, running && this.rt.drive.v > 0.02);
     this.sfx.setSaw(running ? this.rt.cutHeat : 0, this.rt.targets.filter((t) => t >= 0).length);
     this.sfx.tick(dt);
     this.world.render();
@@ -166,7 +167,7 @@ export class App {
         case 'projectComplete':
           this.sfx.projectComplete();
           this.hud.moneyGain(e.bonus);
-          this.releaseBoost();
+          this.releaseDrive();
           this.completeTimer = 2.2;
           this.saveNow();
           break;
@@ -186,9 +187,9 @@ export class App {
           this.sfx.upgrade();
           this.hud.bought('capacity');
           break;
-        case 'expand':
-          this.sfx.expand();
-          this.requestSave(0.3);
+        case 'plotOpen':
+          this.sfx.ready();
+          this.requestSave(0.5);
           break;
         default:
           break;
@@ -312,19 +313,18 @@ export class App {
       } catch {
         /* abaikan */
       }
-      const t: Touch = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, boost: false, panning: false, consumed: false };
+      const t: Touch = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drive: false, panning: false, consumed: false };
       this.touches.set(e.pointerId, t);
       if (this.touches.size >= 2) {
-        this.releaseBoost();
+        this.releaseDrive();
         for (const o of this.touches.values()) o.consumed = true;
         this.pinchDist = this.pinchDistance();
         return;
       }
       if (this.state.completed) return;
-      // Ketuk → boost; tahan → dipertahankan; seret → berubah jadi geser kamera.
-      t.boost = true;
-      boostHold(this.rt, true);
-      if (!this.rt.boost.exhausted) this.sfx.boostStart();
+      // Ketuk → maju sebentar; tahan → jalan terus; seret → berubah jadi geser kamera.
+      t.drive = true;
+      driveHold(this.rt, true);
     });
 
     c.addEventListener('pointermove', (e) => {
@@ -343,10 +343,10 @@ export class App {
       const dy = e.clientY - t.y;
       if (!t.panning && Math.hypot(e.clientX - t.sx, e.clientY - t.sy) > 12) {
         t.panning = true;
-        if (t.boost) {
-          t.boost = false;
-          this.rt.boost.tapTimer = 0;
-          if (![...this.touches.values()].some((o) => o.boost)) boostHold(this.rt, false);
+        if (t.drive) {
+          t.drive = false;
+          this.rt.drive.tapTimer = 0;
+          if (![...this.touches.values()].some((o) => o.drive)) driveHold(this.rt, false);
         }
       }
       if (t.panning) this.world.pan(dx, dy, c.getBoundingClientRect());
@@ -358,7 +358,7 @@ export class App {
       const t = this.touches.get(e.pointerId);
       if (!t) return;
       this.touches.delete(e.pointerId);
-      if (t.boost && ![...this.touches.values()].some((o) => o.boost)) boostHold(this.rt, false);
+      if (t.drive && ![...this.touches.values()].some((o) => o.drive)) driveHold(this.rt, false);
       if (this.touches.size < 2) this.pinchDist = 0;
     };
     c.addEventListener('pointerup', release);
@@ -392,7 +392,7 @@ export class App {
       switch (e.key.toLowerCase()) {
         case ' ':
           e.preventDefault();
-          boostHold(this.rt, true);
+          driveHold(this.rt, true);
           break;
         case 'a':
           this.act(addCutter(this.state, this.events));
@@ -417,10 +417,7 @@ export class App {
       }
     });
     window.addEventListener('keyup', (e) => {
-      if (e.code === 'Space') {
-        boostHold(this.rt, false);
-        boostTap(this.rt);
-      }
+      if (e.code === 'Space') driveHold(this.rt, false);
     });
   }
 
@@ -430,15 +427,15 @@ export class App {
     return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
   }
 
-  private releaseBoost(): void {
-    for (const t of this.touches.values()) t.boost = false;
-    boostHold(this.rt, false);
+  private releaseDrive(): void {
+    for (const t of this.touches.values()) t.drive = false;
+    driveHold(this.rt, false);
   }
 
   private bindLifecycle(): void {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
-        this.releaseBoost();
+        this.releaseDrive();
         this.touches.clear();
         this.saveNow();
         this.sfx.suspend();
@@ -448,7 +445,7 @@ export class App {
       this.resetClock = true;
     });
     window.addEventListener('blur', () => {
-      this.releaseBoost();
+      this.releaseDrive();
       this.resetClock = true;
     });
     window.addEventListener('pagehide', () => this.saveNow());

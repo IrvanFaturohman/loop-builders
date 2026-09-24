@@ -1,7 +1,6 @@
 import { BALANCE } from '../config/balance';
 import { LEVELS } from '../config/levels';
 import { capacity, isPlotComplete, isPlotUnlocked, plotTarget, plotsOf, trackOf } from './economy';
-import { stageCount } from './layout';
 import { defaultTutorial } from './state';
 import type { GameState } from './types';
 import { fieldFor, maxHp } from './worldgen';
@@ -9,8 +8,8 @@ import { fieldFor, maxHp } from './worldgen';
 export const SAVE_KEY = 'loop-builders/train-save';
 export const SETTINGS_KEY = 'loop-builders/settings';
 export const CORRUPT_KEY = 'loop-builders/train-save-corrupt';
-/** Versi 4 = kota di tengah pulau, rel cincin (save versi lama tidak dipakai lagi). */
-export const SCHEMA_VERSION = 4;
+/** Versi 5 = rel mengikuti baris hutan, kereta jalan dengan tap/tahan (save versi lama tidak dipakai lagi). */
+export const SCHEMA_VERSION = 5;
 
 interface SaveFile {
   schema: number;
@@ -49,8 +48,6 @@ export function deserialize(raw: string): GameState | null {
   if (!s || typeof s !== 'object') return null;
   if (!isInt(s.levelIndex) || s.levelIndex < 0 || s.levelIndex >= LEVELS.length) return null;
   if (!isInt(s.cycle) || s.cycle < 0) return null;
-  const level = LEVELS[s.levelIndex];
-  if (!isInt(s.expandStage) || s.expandStage < 0 || s.expandStage >= stageCount(level)) return null;
   if (!isNum(s.money) || !s.train || !Array.isArray(s.train.cutters) || !isNum(s.train.distance)) return null;
   const f = fieldFor(s.levelIndex);
   if (!Array.isArray(s.blocks) || s.blocks.length !== f.n || !s.blocks.every(isNum)) return null;
@@ -65,7 +62,6 @@ export function deserialize(raw: string): GameState | null {
     plots: [],
     stock: isNum(s.stock) ? Math.max(0, Math.floor(s.stock)) : 0,
     completed: false,
-    expandStage: s.expandStage,
     train: {
       distance: 0,
       cutters: s.train.cutters.filter(isInt).map((l) => Math.max(1, Math.min(BALANCE.maxCutterLevel, l))).slice(0, BALANCE.maxCutters).sort((a, b) => b - a),
@@ -86,15 +82,15 @@ export function deserialize(raw: string): GameState | null {
   };
   if (state.train.cutters.length === 0) state.train.cutters = [1];
 
-  // Blok: dibatasi HP maksimum jenisnya; sel kosong/rel yang sudah diletakkan tetap kosong.
+  // Blok: dibatasi HP maksimum jenisnya; sel tanpa blok tetap kosong. Rel dihitung ulang dari sini.
   state.blocks = s.blocks.map((v, c) => {
     const max = maxHp(f, c);
-    if (max < 0 || (f.railStage[c] >= 0 && f.railStage[c] <= state.expandStage)) return -1;
-    if (v < 0) return 0;
+    if (max < 0) return -1;
+    if (v <= 0) return 0;
     return Math.min(max, v);
   });
 
-  // Kavling: progres hanya untuk distrik terbuka, dibatasi biaya.
+  // Kavling: progres hanya untuk kavling yang sudah di dalam rel, dibatasi biaya.
   state.plots = s.plots.map((v, i) => (isPlotUnlocked(state, i) ? Math.max(0, Math.min(Math.floor(v), plotTarget(state, i))) : 0));
   state.completed = !!s.completed && state.plots.every((_, i) => isPlotComplete(state, i));
 

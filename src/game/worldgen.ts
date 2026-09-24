@@ -1,12 +1,12 @@
 import { BALANCE } from '../config/balance';
 import { LEVELS } from '../config/levels';
-import { bandOf, LOT_D, LOT_W, plotsOfLevel, railStageOf, stageCount } from './layout';
+import { bandOf, districtCount } from './layout';
 import type { BlockKind } from './types';
 
 /**
- * Hutan: grid sel 1×1 menutupi pulau. Tiap sel berisi satu blok (pohon/batu/kristal) atau
- * kosong. Hutan hanya ada di pita-pita di luar rel pertama; jenis bloknya diacak deterministik
- * (seed level) menurut bobot pita. Data ini tidak disimpan — hanya HP sisa tiap sel yang masuk save.
+ * Hutan: grid sel 1×1 menutupi pulau, rapat tanpa celah sehingga blok tersusun dalam baris
+ * yang sejajar rel. Jenis blok diacak deterministik (seed level) menurut bobot pita.
+ * Data ini tidak disimpan — hanya HP sisa tiap sel yang masuk save.
  */
 
 export const KINDS: BlockKind[] = ['tree', 'treeGold', 'treeRed', 'rock', 'crystal'];
@@ -22,10 +22,6 @@ export interface Field {
   z: Float32Array;
   /** Pita hutan sel (-1 = alun-alun, stageCount = di luar pulau). */
   band: Int8Array;
-  /** Tahap yang relnya melewati sel ini (-1 = tidak pernah). */
-  railStage: Int8Array;
-  /** Kavling yang menempati sel ini (-1 = tidak ada). Hanya untuk tampilan tanah. */
-  plotOf: Int16Array;
   /** Sel berblok per pita (untuk progres & pemicu rel melebar). */
   bandCells: number[][];
 }
@@ -51,9 +47,7 @@ export function fieldFor(levelIndex: number): Field {
   const x = new Float32Array(n);
   const z = new Float32Array(n);
   const band = new Int8Array(n);
-  const railStage = new Int8Array(n);
-  const plotOf = new Int16Array(n).fill(-1);
-  const bands = stageCount(level);
+  const bands = districtCount(level);
   const bandCells: number[][] = Array.from({ length: bands }, () => []);
   const r = rng(level.seed);
   for (let j = 0; j < cols; j++) {
@@ -62,12 +56,9 @@ export function fieldFor(levelIndex: number): Field {
       x[c] = -half + (i + 0.5) * CELL;
       z[c] = -half + (j + 0.5) * CELL;
       band[c] = bandOf(level, x[c], z[c]);
-      railStage[c] = railStageOf(level, x[c], z[c]);
-      const roll = r();
       const pick = r();
       const b = band[c];
-      if (b < 0 || b >= bands || railStage[c] === 0) continue;
-      if (roll < 0.035) continue; // celah alami
+      if (b < 0 || b >= bands) continue;
       const entries = KINDS.map((k) => [k, level.bands[b][k] ?? 0] as const).filter(([, w]) => w > 0);
       const total = entries.reduce((s, [, w]) => s + w, 0);
       let acc = 0;
@@ -82,13 +73,7 @@ export function fieldFor(levelIndex: number): Field {
       bandCells[b].push(c);
     }
   }
-  for (const p of plotsOfLevel(levelIndex)) {
-    const alongX = Math.abs(p.facing.z) > Math.abs(p.facing.x);
-    const hx = (alongX ? LOT_W : LOT_D) / 2;
-    const hz = (alongX ? LOT_D : LOT_W) / 2;
-    for (let c = 0; c < n; c++) if (Math.abs(x[c] - p.pos.x) < hx && Math.abs(z[c] - p.pos.z) < hz) plotOf[c] = p.index;
-  }
-  f = { half, cols, n, kind, x, z, band, railStage, plotOf, bandCells };
+  f = { half, cols, n, kind, x, z, band, bandCells };
   cache.set(levelIndex, f);
   return f;
 }

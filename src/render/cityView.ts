@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { RAIL_CLEAR, railOffset, ringPath, stationPoint } from '../game/layout';
+import { bandStart, districtCount, RAIL_CLEAR, ringPath } from '../game/layout';
+import { depthAt, type Rail } from '../game/rail';
+import { fieldFor } from '../game/worldgen';
 import type { LevelDefinition } from '../game/types';
 import { ccyl, mergeFlat } from './geom';
 import { SHARED } from './palette';
@@ -53,9 +55,9 @@ function ringStrip(level: LevelDefinition, offset: number, w: number, y: number)
 }
 
 /**
- * Tanah kota: rumput yang menutupi seluruh lahan di dalam rel (tumbuh setiap rel melebar),
- * jalan lingkar di celah antar distrik, jalan utama dari alun-alun ke stasiun, dan air mancur
- * di tengah. Hanya tampilan — posisi kavling tetap dari layout.ts.
+ * Tanah kota: rumput yang menutupi seluruh lahan di dalam rel (ikut tumbuh setiap rel maju),
+ * jalan lingkar di celah antar distrik yang sudah seluruhnya di dalam rel, jalan utama dari
+ * alun-alun ke stasiun, dan air mancur di tengah. Hanya tampilan — kavling dari layout.ts.
  */
 export class CityView {
   readonly group = new THREE.Group();
@@ -63,15 +65,11 @@ export class CityView {
   private readonly streets = new THREE.Group();
   private readonly avenue: THREE.Mesh;
   private readonly paveMat = new THREE.MeshStandardMaterial({ color: PAVE, roughness: 1 });
-  private stage = 0;
-  private pending = -1;
-  private pendingT = 0;
-  private grow = 1;
-  private growFrom = 1;
+  private streetCount = -1;
   private readonly water: THREE.Mesh;
   private time = 0;
 
-  constructor(private readonly level: LevelDefinition, stage: number) {
+  constructor(private readonly level: LevelDefinition, rail: Rail) {
     this.ground = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({ map: grassTexture(), roughness: 1 }));
     this.ground.receiveShadow = true;
     this.avenue = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.paveMat);
@@ -92,68 +90,74 @@ export class CityView {
     plaza.receiveShadow = true;
 
     this.group.add(this.ground, this.streets, this.avenue, plaza, fountain, this.water);
-    this.build(stage);
+    this.ground.position.y = 0.008;
+    this.setRail(rail);
   }
 
-  /** Rel melebar ke `stage`: tanah & jalan baru dibangun setelah `delay` detik (menunggu morph rel). */
-  setStage(stage: number, delay: number): void {
-    if (stage === this.stage && this.pending < 0) return;
-    this.pending = stage;
-    this.pendingT = delay;
-  }
-
-  private groundHalf(stage: number): number {
-    return this.level.ringStart + railOffset(this.level, stage) - EDGE;
-  }
-
-  private build(stage: number): void {
-    const prevHalf = this.groundHalf(this.stage);
-    this.stage = stage;
-    // Tanah: cincin rel sekarang dikurangi koridor rel, diisi penuh.
-    const path = ringPath(this.level, railOffset(this.level, stage) - EDGE);
-    const pts: THREE.Vector2[] = [];
-    for (let d = 0; d < path.length; d += 0.2) {
-      const p = path.pointAt(d);
-      pts.push(new THREE.Vector2(p.x, -p.z));
+  /** Bangun ulang tanah mengikuti rel sekarang (dipanggil tiap rel maju). */
+  setRail(rail: Rail): void {
+    // Tanah: satu kotak per sel di belakang rel, tepinya lurus-siku seperti rel.
+    const f = fieldFor(rail.levelIndex);
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const idx: number[] = [];
+    for (let c = 0; c < f.n; c++) {
+      if (rail.depth[c] < 2) continue;
+      const x0 = f.x[c] - 0.5;
+      const z0 = f.z[c] - 0.5;
+      const v = pos.length / 3;
+      for (const [dx, dz] of [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ]) {
+        pos.push(x0 + dx, 0, z0 + dz);
+        uv.push((x0 + dx) * 0.5, (z0 + dz) * 0.5);
+      }
+      idx.push(v, v + 2, v + 1, v, v + 3, v + 2);
     }
-    const geo = new THREE.ShapeGeometry(new THREE.Shape(pts), 1);
-    geo.rotateX(-Math.PI / 2);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
     this.ground.geometry.dispose();
     this.ground.geometry = geo;
-    this.ground.position.y = 0.008;
-    this.growFrom = prevHalf / this.groundHalf(stage);
-    this.grow = this.growFrom < 1 ? 0 : 1;
 
-    // Jalan lingkar di celah tiap distrik lama.
-    for (const m of this.streets.children) (m as THREE.Mesh).geometry.dispose();
-    this.streets.clear();
-    for (let k = 1; k <= stage; k++) {
-      const m = new THREE.Mesh(ringStrip(this.level, railOffset(this.level, k - 1) - STREET_IN, STREET_W, 0.014), this.paveMat);
-      m.receiveShadow = true;
-      this.streets.add(m);
+    // Jalan lingkar distrik k muncul begitu seluruh cincinnya sudah di belakang rel.
+    let n = 0;
+    for (let k = 1; k < districtCount(this.level); k++) {
+      const path = ringPath(this.level, bandStart(this.level, k - 1) - STREET_IN);
+      const p = { x: 0, z: 0 };
+      let ok = true;
+      for (let d = 0; d < path.length && ok; d += 0.5) {
+        path.pointAt(d, p);
+        if (depthAt(rail, p.x, p.z) < 2) ok = false;
+      }
+      if (!ok) break;
+      n = k;
+    }
+    if (n !== this.streetCount) {
+      this.streetCount = n;
+      for (const m of this.streets.children) (m as THREE.Mesh).geometry.dispose();
+      this.streets.clear();
+      for (let k = 1; k <= n; k++) {
+        const m = new THREE.Mesh(ringStrip(this.level, bandStart(this.level, k - 1) - STREET_IN, STREET_W, 0.014), this.paveMat);
+        m.receiveShadow = true;
+        this.streets.add(m);
+      }
     }
 
-    // Jalan utama: alun-alun → stasiun.
-    const end = stationPoint(this.level, stage).z - EDGE;
+    // Jalan utama: alun-alun → stasiun (titik rel di jarak 0).
+    const end = rail.track.pointAt(0).z - EDGE;
     const start = 0.7;
-    this.avenue.scale.set(0.9, end - start, 1);
+    this.avenue.scale.set(0.9, Math.max(0.1, end - start), 1);
     this.avenue.position.set(0, 0.016, (start + end) / 2);
   }
 
   update(dt: number): void {
     this.time += dt;
-    if (this.pending >= 0) {
-      this.pendingT -= dt;
-      if (this.pendingT <= 0) {
-        this.build(this.pending);
-        this.pending = -1;
-      }
-    }
-    if (this.grow < 1) {
-      this.grow = Math.min(1, this.grow + dt / 0.8);
-      const e = 1 - Math.pow(1 - this.grow, 3);
-      this.ground.scale.setScalar(this.growFrom + (1 - this.growFrom) * e);
-    } else this.ground.scale.setScalar(1);
     this.water.position.y = 0.15 + Math.sin(this.time * 3) * 0.01;
   }
 

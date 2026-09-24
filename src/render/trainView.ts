@@ -8,12 +8,10 @@ export const WAGON_COLORS = ['#e0463a', '#3db8f5', '#9b6bff', '#ff8a3d', '#ff5a8
 
 const DARK = '#3a3f4b';
 const STEEL = '#8a929e';
-/** Tinggi gerinda di atas tanah: sejajar batang pohon / sisi batu. */
-const DISC_Y = 0.36;
-/** Pangkal lengan di sisi kiri pemotong (lokal: +x maju, -z kiri = luar loop). */
-const PIVOT = new THREE.Vector3(0, 0.46, -0.3);
-/** Posisi gerinda saat lengan ditarik (lokal). */
-const REST = new THREE.Vector3(0.05, DISC_Y + 0.04, -0.62);
+/** Posisi gerinda di sisi kiri pemotong (lokal: +x maju, -z kiri = luar loop = arah hutan). */
+const DISC_POS = new THREE.Vector3(0, 0.36, -0.58);
+/** Geser maksimum gerinda ke arah blok yang sedang digerus (supaya terlihat menekan). */
+const DISC_PUSH = 0.14;
 const MAX_CARGO_ITEMS = 12;
 
 let locoGeo: THREE.BufferGeometry | null = null;
@@ -21,7 +19,6 @@ let hopperGeo: THREE.BufferGeometry | null = null;
 const cutterGeo = new Map<number, THREE.BufferGeometry>();
 const discGeo = new Map<number, THREE.BufferGeometry>();
 let wheelGeo: THREE.BufferGeometry | null = null;
-let armGeo: THREE.BufferGeometry | null = null;
 
 function locomotive(): THREE.BufferGeometry {
   if (!locoGeo) {
@@ -79,19 +76,13 @@ function cutterBody(level: number): THREE.BufferGeometry {
       // kisi mesin & knalpot
       cbox(0.3, 0.04, 0.3, DARK, -0.12, 0.71, 0.06, 0.01),
       ccyl(0.04, 0.2, DARK, 8, 0.24, 0.8, 0.14),
-      // dudukan lengan (sisi kiri)
-      cbox(0.26, 0.2, 0.16, STEEL, 0, 0.46, -0.28, 0.03),
-      ccyl(0.09, 0.2, d, 10, 0, 0.46, -0.3, Math.PI / 2, 0, 0),
+      // dudukan gerinda (sisi kiri)
+      cbox(0.3, 0.12, 0.3, STEEL, 0, 0.42, -0.36, 0.03),
+      ccyl(0.07, 0.16, d, 10, 0, 0.5, -0.58),
     ]);
     cutterGeo.set(level, g);
   }
   return g;
-}
-
-/** Lengan baja satuan: panjang 1 sepanjang +x lokal, pangkal di x=0. */
-function arm(): THREE.BufferGeometry {
-  if (!armGeo) armGeo = mergeFlat([cbox(1, 0.07, 0.09, STEEL, 0.5, 0, 0, 0.02), cbox(1, 0.025, 0.05, '#ffd23f', 0.5, 0.045, 0, 0.01)]);
-  return armGeo;
 }
 
 /** Gerinda horizontal (sumbu putar = y) bergerigi; makin besar tiap tingkat. */
@@ -131,8 +122,6 @@ const _q = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _p = new THREE.Vector3();
 const _a = new THREE.Vector3();
-const _b = new THREE.Vector3();
-const X_AXIS = new THREE.Vector3(1, 0, 0);
 
 /** Satu mobil (lokomotif, gerbong muatan, atau pemotong) yang diposisikan di rel oleh TrainView. */
 class Car {
@@ -156,25 +145,19 @@ class Car {
   }
 }
 
-/**
- * Pemotong: lengan & gerinda hidup di ruang dunia (anak TrainView.group), bukan anak mobil,
- * supaya ujung gerinda bisa menempel tepat di blok target walau mobil terus berjalan & berbelok.
- */
+/** Pemotong: gerinda horizontal menempel di sisi kirinya (anak mobil, ikut berbelok). */
 class Cutter extends Car {
-  readonly arm = new THREE.Mesh(arm(), SHARED.vertexStd);
   readonly disc: THREE.Mesh;
   level = 1;
-  /** Posisi gerinda saat ini (dunia) — mengejar tujuan dengan halus. */
-  readonly tip = new THREE.Vector3();
-  tipInit = false;
-  /** 0 = ditarik, 1 = menempel di target. */
+  /** 0 = diam di dudukan, 1 = menekan blok target. */
   engaged = 0;
 
   constructor() {
     super(cutterBody(1), [0.28, -0.28]);
     this.disc = new THREE.Mesh(disc(1), SHARED.vertexStd);
-    this.arm.castShadow = true;
     this.disc.castShadow = true;
+    this.disc.position.copy(DISC_POS);
+    this.group.add(this.disc);
   }
 
   setLevel(level: number): void {
@@ -225,11 +208,11 @@ export class TrainView {
     while (this.cutters.length < levels.length) {
       const c = new Cutter();
       this.cutters.push(c);
-      this.group.add(c.group, c.arm, c.disc);
+      this.group.add(c.group);
     }
     while (this.cutters.length > levels.length) {
       const c = this.cutters.pop()!;
-      this.group.remove(c.group, c.arm, c.disc);
+      this.group.remove(c.group);
     }
     levels.forEach((l, i) => this.cutters[i].setLevel(l));
     this.levels = [...levels];
@@ -246,11 +229,11 @@ export class TrainView {
     return out.copy(car.group.position).setY(0.6);
   }
 
-  /** Titik sentuh gerinda pemotong k (dunia), atau null bila lengannya ditarik. */
+  /** Titik sentuh gerinda pemotong k (dunia), atau null bila tidak sedang menggerus. */
   contactPoint(k: number, out: THREE.Vector3): THREE.Vector3 | null {
     const c = this.cutters[k];
-    if (!c || c.engaged < 0.7) return null;
-    return out.copy(c.tip);
+    if (!c || c.engaged < 0.5) return null;
+    return c.disc.getWorldPosition(out);
   }
 
   bumpWagon(i: number): void {
@@ -264,8 +247,8 @@ export class TrainView {
   }
 
   /**
-   * pointAt(d) & tangentAt(d) disuplai World (sudah termasuk morph rel saat melebar).
-   * fill = 0..1 isi muatan; targets[k] = pusat blok yang dipotong pemotong k (dunia) atau null.
+   * pointAt(d) & tangentAt(d) disuplai World (sudah termasuk morph rel saat rel maju).
+   * fill = 0..1 isi muatan; targets[k] = pusat blok yang digerus pemotong k (dunia) atau null.
    */
   update(
     dt: number,
@@ -281,7 +264,8 @@ export class TrainView {
     this.time += dt;
     this.wheelSpin -= speed * dt * 8;
     const cutting = targets.some((t) => t !== null);
-    this.discSpin += (cutting ? 22 : 6) * dt;
+    // Gerinda hanya berputar saat kereta jalan (sama seperti di simulasi).
+    this.discSpin += (speed > 0.01 ? (cutting ? 24 : 12) : 0) * dt;
     const tan = new THREE.Vector3();
     const placeCar = (car: Car, d: number, idx: number) => {
       pointAt(d, car.group.position);
@@ -328,42 +312,21 @@ export class TrainView {
 
     this.cutters.forEach((c, i) => {
       placeCar(c, locoD - (i + 2) * spacing, i + 1);
-      this.aimArm(c, targets[i] ?? null, dt);
+      this.aimDisc(c, targets[i] ?? null, dt);
     });
   }
 
-  /**
-   * Lengan: dari pangkal di sisi kiri mobil ke gerinda. Saat ada target, gerinda ditempatkan
-   * di sisi blok yang menghadap pemotong sehingga piringannya masuk ke batang/batu; tanpa
-   * target, lengan terlipat di samping mobil.
-   */
-  private aimArm(c: Cutter, target: THREE.Vector3 | null, dt: number): void {
-    const pivot = c.group.localToWorld(_a.copy(PIVOT));
-    const goal = _b;
+  /** Gerinda tetap di dudukannya, sedikit terdorong ke arah blok yang sedang digerus. */
+  private aimDisc(c: Cutter, target: THREE.Vector3 | null, dt: number): void {
+    c.engaged += ((target ? 1 : 0) - c.engaged) * (1 - Math.exp(-dt * 12));
+    c.disc.position.copy(DISC_POS);
     if (target) {
-      const dx = target.x - pivot.x;
-      const dz = target.z - pivot.z;
-      const len = Math.hypot(dx, dz) || 1;
-      // Pusat gerinda di tepi blok: separuh piringan masuk ke blok, separuh terlihat.
-      const back = 0.42 + discRadius(c.level) * 0.25;
-      goal.set(target.x - (dx / len) * back, DISC_Y, target.z - (dz / len) * back);
-    } else c.group.localToWorld(goal.copy(REST));
-    if (!c.tipInit) {
-      c.tip.copy(goal);
-      c.tipInit = true;
+      const local = c.group.worldToLocal(_a.copy(target)).setY(DISC_POS.y).sub(DISC_POS);
+      const len = local.length();
+      if (len > 1e-3) c.disc.position.addScaledVector(local, (Math.min(DISC_PUSH, len) / len) * c.engaged);
+      c.disc.position.y += Math.sin(this.time * 60 + c.level) * 0.012;
     }
-    c.tip.lerp(goal, 1 - Math.exp(-dt * (target ? 16 : 10)));
-    c.engaged += ((target ? 1 : 0) - c.engaged) * (1 - Math.exp(-dt * 10));
-
-    const dir = _p.copy(c.tip).sub(pivot);
-    const L = Math.max(0.05, dir.length());
-    c.arm.position.copy(pivot);
-    c.arm.quaternion.setFromUnitVectors(X_AXIS, dir.multiplyScalar(1 / L));
-    c.arm.scale.set(L, 1, 1);
-    c.disc.position.copy(c.tip);
     c.disc.rotation.set(0, this.discSpin * (1 + 0.1 * c.level), 0);
-    const wobble = target ? Math.sin(this.time * 60 + c.level) * 0.015 : 0;
-    c.disc.position.y += wobble;
   }
 
   /** Titik cerobong (dunia) untuk asap. */

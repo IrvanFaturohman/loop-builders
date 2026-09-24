@@ -1,7 +1,6 @@
 import { BALANCE } from '../config/balance';
 import { completedModuleCount } from './building';
 import {
-  bandRemaining,
   buildCoins,
   capacity,
   cargoPoints,
@@ -20,78 +19,65 @@ import {
   trainSpeed,
 } from './economy';
 import type { EventSink } from './events';
-import { stageCount } from './layout';
+import { enclosedBlocks, isPlotInside, railMapping, updateRail } from './rail';
 import { computeCrossings } from './track';
-import { stageMapping } from './tracks';
 import type { GameState, Runtime, Vec2 } from './types';
-import { fieldFor, forCellsInRadius, KINDS, type Field } from './worldgen';
+import { cellPoints, fieldFor, forCellsInRadius, KINDS, type Field } from './worldgen';
 
 /** HP sisa blok yang sudah tumbang tapi belum muat di gerbong muatan (menunggu ruang). */
 const HOLD_HP = 0.01;
+/** Di bawah laju ini kereta dianggap diam: gerinda tidak memotong. */
+const MOVING = 0.05;
 
 /**
  * Satu langkah simulasi (sub-step kecil, maks BALANCE.maxStepDt).
- * Urutan: boost → gerak kereta (+ bongkar di stasiun) → pemotong → rel melebar bila pita bersih.
+ * Urutan: kontrol → gerak kereta (+ bongkar di stasiun) → pemotong → rel maju bila ada blok hancur.
+ * Tanpa input pemain kereta diam dan tidak ada yang terpotong.
  */
 export function step(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
   if (dt <= 0) return;
-  updateBoost(rt, dt);
+  updateDrive(rt, dt);
   rt.cutHeat = Math.max(0, rt.cutHeat - dt * 3);
   if (state.completed) return;
   state.stats.levelTime += dt;
   state.stats.totalTime += dt;
-  if (rt.freeze > 0) {
-    rt.freeze = Math.max(0, rt.freeze - dt);
+  if (rt.drive.v < MOVING) {
+    rt.fullTime = cargoTotal(state.train.cargo) >= capacity(state) ? rt.fullTime + dt : 0;
     return;
   }
   moveTrain(state, rt, dt, events);
   if (state.completed) return;
-  cut(state, rt, dt, events);
-  expandIfCleared(state, rt, events);
+  if (cut(state, rt, dt, events)) growRail(state, events);
 }
 
 // ---------------------------------------------------------------------------
-// Boost
+// Kontrol: tahan = jalan, tap = maju sebentar
 // ---------------------------------------------------------------------------
 
-export function boostTap(rt: Runtime): void {
-  if (rt.boost.exhausted) return;
-  rt.boost.tapTimer = Math.max(rt.boost.tapTimer, BALANCE.boost.tapDuration);
+export function driveTap(rt: Runtime): void {
+  const cfg = BALANCE.drive;
+  rt.drive.tapTimer = Math.min(cfg.tapMax, rt.drive.tapTimer + cfg.tap);
 }
 
-export function boostHold(rt: Runtime, holding: boolean): void {
-  rt.boost.holding = holding;
-  if (holding) boostTap(rt);
+export function driveHold(rt: Runtime, holding: boolean): void {
+  rt.drive.holding = holding;
+  if (holding) driveTap(rt);
 }
 
-export function isBoosting(rt: Runtime): boolean {
-  const b = rt.boost;
-  return !b.exhausted && (b.holding || b.tapTimer > 0);
+export function isDriving(rt: Runtime): boolean {
+  return rt.drive.holding || rt.drive.tapTimer > 0;
 }
 
-function updateBoost(rt: Runtime, dt: number): void {
-  const b = rt.boost;
-  const cfg = BALANCE.boost;
-  const wants = isBoosting(rt);
-  b.tapTimer = Math.max(0, b.tapTimer - dt);
-  if (wants) {
-    b.energy -= dt / cfg.maxHoldSeconds;
-    b.usedSeconds += dt;
-    b.rechargeDelay = cfg.rechargeDelay;
-    if (b.energy <= 0) {
-      b.energy = 0;
-      b.exhausted = true;
-      b.tapTimer = 0;
-    }
-  } else {
-    b.rechargeDelay = Math.max(0, b.rechargeDelay - dt);
-    if (b.rechargeDelay === 0) b.energy = Math.min(1, b.energy + dt / cfg.rechargeSeconds);
-    if (b.exhausted && b.energy >= cfg.resumeAt) b.exhausted = false;
-  }
-  const target = wants && !b.exhausted ? cfg.mult : 1;
-  const rate = target > b.mult ? cfg.accel : cfg.decel;
-  b.mult += (target - b.mult) * (1 - Math.exp(-rate * dt));
-  if (Math.abs(target - b.mult) < 0.001) b.mult = target;
+function updateDrive(rt: Runtime, dt: number): void {
+  const d = rt.drive;
+  const cfg = BALANCE.drive;
+  d.tapTimer = Math.max(0, d.tapTimer - dt);
+  const want = isDriving(rt);
+  if (want) d.usedSeconds += dt;
+  const target = want ? 1 : 0;
+  d.v += (target - d.v) * (1 - Math.exp(-(target > d.v ? cfg.accel : cfg.decel) * dt));
+  if (want && d.v > 0.995) d.v = 1;
+  if (!want && d.v < 0.02) d.v = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +96,7 @@ export function cutterDistance(state: GameState, k: number): number {
 
 function moveTrain(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
   const track = trackOf(state);
-  const move = Math.min(trainSpeed(state) * rt.boost.mult * dt, track.length * 0.5);
+  const move = Math.min(trainSpeed(state) * rt.drive.v * dt, track.length * 0.5);
   const station = [{ d: STATION_D, data: null }];
   if (computeCrossings(state.train.distance, move, track.length, station).length) unload(state, events);
   state.train.distance = track.wrap(state.train.distance + move);
@@ -120,27 +106,24 @@ function moveTrain(state: GameState, rt: Runtime, dt: number, events: EventSink)
 // Pemotong
 // ---------------------------------------------------------------------------
 
-/** Blok bisa dipotong pemotong di p (arah luar o) dengan lengan R: hidup, di kiri, terjangkau. */
-function reachable(state: GameState, f: Field, c: number, p: Vec2, o: Vec2, R: number): boolean {
+/** Blok bisa digerus gerinda berpusat di g (rel di p, arah luar o): hidup, di kiri, tersentuh. */
+function reachable(state: GameState, f: Field, c: number, p: Vec2, o: Vec2, g: Vec2, R: number): boolean {
   if (state.blocks[c] <= 0) return false;
-  const dx = f.x[c] - p.x;
-  const dz = f.z[c] - p.z;
-  return dx * o.x + dz * o.z > 0 && dx * dx + dz * dz <= R * R;
+  if ((f.x[c] - p.x) * o.x + (f.z[c] - p.z) * o.z <= 0) return false;
+  const dx = f.x[c] - g.x;
+  const dz = f.z[c] - g.z;
+  return dx * dx + dz * dz <= R * R;
 }
 
-/**
- * Target terdekat yang belum dipegang pemotong lain; bila semua sudah dipegang, boleh berbagi.
- * Blok di pita tahap ini didahulukan supaya rel cepat melebar — pita berikutnya (terjangkau
- * lengan panjang) hanya diambil bila tidak ada pilihan lain.
- */
-function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, R: number, claimed: readonly number[]): number {
+/** Blok terdekat ke gerinda yang belum dipegang pemotong lain; bila semua dipegang, boleh berbagi. */
+function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, g: Vec2, R: number, claimed: readonly number[]): number {
   let best = -1;
   let bestD = Infinity;
   let shared = -1;
   let sharedD = Infinity;
-  forCellsInRadius(f.half, f.cols, p.x, p.z, R, (c) => {
-    if (!reachable(state, f, c, p, o, R)) return;
-    const d = Math.hypot(f.x[c] - p.x, f.z[c] - p.z) + (f.band[c] === state.expandStage ? 0 : 100);
+  forCellsInRadius(f.half, f.cols, g.x, g.z, R, (c) => {
+    if (!reachable(state, f, c, p, o, g, R)) return;
+    const d = Math.hypot(f.x[c] - g.x, f.z[c] - g.z);
     if (claimed.includes(c)) {
       if (d < sharedD) {
         sharedD = d;
@@ -155,12 +138,12 @@ function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, R: number, cla
 }
 
 /**
- * Tiap pemotong menjulurkan lengan ke kiri (luar loop) dan memotong SATU blok sampai tumbang,
- * lalu pindah target. Blok tumbang masuk gerbong muatan utuh — bila tidak muat, blok ditahan
- * di ambang tumbang sampai muatan dibongkar, jadi tidak ada bahan yang hilang (kota butuh
- * seluruh hasil hutan). Saat muatan penuh semua lengan ditarik.
+ * Tiap pemotong punya gerinda horizontal yang menempel di sisi kirinya (arah hutan) dan menggerus
+ * SATU blok yang disentuhnya sampai tumbang. Blok tumbang masuk gerbong muatan utuh — bila tidak
+ * muat, blok ditahan di ambang tumbang sampai muatan dibongkar, jadi tidak ada bahan yang hilang.
+ * Mengembalikan true bila ada blok yang tumbang (rel perlu dihitung ulang).
  */
-function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
+function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): boolean {
   const f = fieldFor(state.levelIndex);
   const track = trackOf(state);
   const cap = capacity(state);
@@ -170,20 +153,24 @@ function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): void
   if (cargoTotal(cargo) >= cap) {
     rt.fullTime += dt;
     rt.targets.fill(-1);
-    return;
+    return false;
   }
   const p = { x: 0, z: 0 };
   const o = { x: 0, z: 0 };
+  const g = { x: 0, z: 0 };
   let stalled = false;
+  let felled = false;
   cutters.forEach((lvl, k) => {
     const d = cutterDistance(state, k);
     track.pointAt(d, p);
     track.outwardAt(d, o);
+    g.x = p.x + o.x * BALANCE.cutter.side;
+    g.z = p.z + o.z * BALANCE.cutter.side;
     const R = cutterReach(lvl);
     let t = rt.targets[k];
-    if (t < 0 || !reachable(state, f, t, p, o, R)) {
+    if (t < 0 || !reachable(state, f, t, p, o, g, R)) {
       rt.targets[k] = -1;
-      t = pickTarget(state, f, p, o, R, rt.targets);
+      t = pickTarget(state, f, p, o, g, R, rt.targets);
       rt.targets[k] = t;
     }
     if (t < 0) return;
@@ -200,9 +187,38 @@ function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): void
     state.blocks[t] = 0;
     state.stats.totalCut++;
     rt.targets[k] = -1;
+    felled = true;
     events.push({ type: 'cut', cell: t, cutter: k, res: def.res, amount: def.amount });
   });
   rt.fullTime = stalled || cargoTotal(cargo) >= cap ? rt.fullTime + dt : 0;
+  return felled;
+}
+
+// ---------------------------------------------------------------------------
+// Rel maju
+// ---------------------------------------------------------------------------
+
+/**
+ * Hitung ulang rel setelah blok hancur. Bila bentuknya berubah, posisi kereta dipetakan ke rel
+ * baru (bagian rel yang sama tetap di tempat), blok yang kini terkurung di dalam rel dibongkar
+ * otomatis ke gudang, kavling yang kini di dalam rel terbuka, dan bahan gudang langsung dipasang.
+ */
+export function growRail(state: GameState, events: EventSink): boolean {
+  const ch = updateRail(state);
+  if (!ch) return false;
+  state.train.distance = ch.to.track.wrap(railMapping(ch.from, ch.to).map(state.train.distance));
+  events.push({ type: 'railGrow' });
+  const f = fieldFor(state.levelIndex);
+  for (const c of enclosedBlocks(ch.to, state.blocks)) {
+    const points = cellPoints(f, c);
+    state.blocks[c] = 0;
+    state.stock += points;
+    state.stats.totalCut++;
+    events.push({ type: 'harvest', cell: c, points });
+  }
+  for (let p = 0; p < state.plots.length; p++) if (!isPlotInside(ch.from, p) && isPlotInside(ch.to, p)) events.push({ type: 'plotOpen', plot: p });
+  install(state, events);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,38 +259,6 @@ export function install(state: GameState, events: EventSink): void {
     }
   }
   if (state.plots.every((_, i) => isPlotComplete(state, i)) && state.blocks.every((b) => b <= 0)) completeLevel(state, events);
-}
-
-// ---------------------------------------------------------------------------
-// Rel melebar
-// ---------------------------------------------------------------------------
-
-/**
- * Pita hutan tahap ini bersih → rel pindah ke cincin berikutnya (sudah di lahan bersih).
- * Posisi kereta dipetakan proporsional dengan stasiun sebagai titik bersama; muatan &
- * pemotong tidak berubah. Distrik baru terbuka dan bahan di gudang langsung dipasang.
- */
-export function expandIfCleared(state: GameState, rt: Runtime | null, events: EventSink): boolean {
-  const from = state.expandStage;
-  const to = from + 1;
-  if (to >= stageCount(levelDef(state)) || bandRemaining(state, from) > 0) return false;
-  state.train.distance = stageMapping(state.levelIndex, from, to).map(state.train.distance);
-  state.expandStage = to;
-  const f = fieldFor(state.levelIndex);
-  const cleared: number[] = [];
-  for (let c = 0; c < f.n; c++) {
-    if (f.railStage[c] === to && state.blocks[c] !== -1) {
-      state.blocks[c] = -1;
-      cleared.push(c);
-    }
-  }
-  if (rt) {
-    rt.freeze = BALANCE.expandFreeze;
-    rt.targets = [];
-  }
-  events.push({ type: 'expand', from, to, cleared });
-  install(state, events);
-  return true;
 }
 
 function completeLevel(state: GameState, events: EventSink): void {
