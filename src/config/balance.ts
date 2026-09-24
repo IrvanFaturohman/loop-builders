@@ -13,7 +13,7 @@ export const BALANCE = {
    * Pemotong: kerusakan per detik pada satu target (Lv1) & pengali per tingkat merge;
    * panjang lengan Lv1 harus menjangkau tepi terjauh pita hutan (diuji di layout.test.ts).
    */
-  cutter: { dps: 3.5, growth: 1.8, reach: 3.5, reachPerLevel: 0.3 },
+  cutter: { dps: 3.5, growth: 1.8, reach: 3.8, reachPerLevel: 0.3 },
   /** Jarak antar gerbong di rel. */
   wagonSpacing: 1.05,
   maxCutters: 12,

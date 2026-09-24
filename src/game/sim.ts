@@ -128,7 +128,11 @@ function reachable(state: GameState, f: Field, c: number, p: Vec2, o: Vec2, R: n
   return dx * o.x + dz * o.z > 0 && dx * dx + dz * dz <= R * R;
 }
 
-/** Target terdekat yang belum dipegang pemotong lain; bila semua sudah dipegang, boleh berbagi. */
+/**
+ * Target terdekat yang belum dipegang pemotong lain; bila semua sudah dipegang, boleh berbagi.
+ * Blok di pita tahap ini didahulukan supaya rel cepat melebar — pita berikutnya (terjangkau
+ * lengan panjang) hanya diambil bila tidak ada pilihan lain.
+ */
 function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, R: number, claimed: readonly number[]): number {
   let best = -1;
   let bestD = Infinity;
@@ -136,7 +140,7 @@ function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, R: number, cla
   let sharedD = Infinity;
   forCellsInRadius(f.half, f.cols, p.x, p.z, R, (c) => {
     if (!reachable(state, f, c, p, o, R)) return;
-    const d = Math.hypot(f.x[c] - p.x, f.z[c] - p.z);
+    const d = Math.hypot(f.x[c] - p.x, f.z[c] - p.z) + (f.band[c] === state.expandStage ? 0 : 100);
     if (claimed.includes(c)) {
       if (d < sharedD) {
         sharedD = d;

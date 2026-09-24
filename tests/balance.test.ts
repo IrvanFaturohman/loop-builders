@@ -99,9 +99,10 @@ describe('pacing (bot)', () => {
     const [l1, l2] = results;
     expect(l1.firsts.cut).toBeLessThan(3);
     expect(l1.firsts.unload).toBeLessThan(20);
-    expect(l1.firsts.house).toBeLessThan(120);
-    expect(l1.t).toBeGreaterThan(180);
-    expect(l1.t).toBeLessThan(900);
-    expect(l2.t).toBeLessThan(1200);
+    expect(l1.firsts.house).toBeLessThan(60);
+    for (const r of results) expect(r.log.length).toBe(3); // rel melebar 3× per level
+    expect(l1.t).toBeGreaterThan(240);
+    expect(l1.t).toBeLessThan(600);
+    expect(l2.t).toBeLessThan(720);
   });
 });
