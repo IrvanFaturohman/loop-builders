@@ -150,7 +150,7 @@ export class App {
           this.sfx.unload(e.points, material);
           if (!this.readyToastShown) {
             this.readyToastShown = true;
-            this.hud.toast('Muatan dibongkar di stasiun dan langsung jadi bangunan kota', 2.8);
+            this.hud.toast('Muatan jadi bangunan kota!', 2.4);
           }
           break;
         case 'deliver':

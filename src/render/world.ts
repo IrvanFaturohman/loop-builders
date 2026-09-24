@@ -97,6 +97,8 @@ export class World {
   private revealDistrict = -1;
   private revealTimer = 0;
   private smokeTimer = 0;
+  private sparkTimer = 0;
+  private readonly aimPool: THREE.Vector3[] = [];
   private width = 1;
   private height = 1;
   private safe: SafeArea = { xL: -0.92, xR: 0.92, yB: -0.6, yT: 0.7 };
@@ -433,9 +435,14 @@ export class World {
   // Per frame
   // ---------------------------------------------------------------------------
 
-  private syncTrain(state: GameState, dt: number, speed: number, boost: number, cutting = 0): void {
-    this.train.setWagons([1, ...state.train.cutters]);
+  private syncTrain(state: GameState, dt: number, speed: number, boost: number, targets: readonly number[] = []): void {
+    this.train.setCutters(state.train.cutters);
     const fill = cargoTotal(state.train.cargo) / Math.max(1, capacity(state));
+    const aims = state.train.cutters.map((_, k) => {
+      const c = targets[k] ?? -1;
+      if (c < 0 || state.blocks[c] <= 0) return null;
+      return this.forest.cellPos(c, this.aimPool[k] ??= new THREE.Vector3());
+    });
     this.train.update(
       dt,
       state.train.distance,
@@ -444,16 +451,30 @@ export class World {
       (d, out) => this.track.tangentAt(d, out),
       speed,
       fill,
-      cutting,
+      aims,
       boost,
     );
+  }
+
+  /** Serpihan kecil terus-menerus di titik sentuh gerinda selama memotong. */
+  private cutSparks(state: GameState, rt: Runtime, dt: number): void {
+    this.sparkTimer -= dt;
+    if (this.sparkTimer > 0) return;
+    this.sparkTimer = 0.09;
+    const f = fieldFor(state.levelIndex);
+    rt.targets.forEach((c, k) => {
+      if (c < 0 || !this.train.contactPoint(k, _v)) return;
+      const kind = KINDS[f.kind[c]];
+      this.effects.puff(_v, { count: 1, size: 0.12, spread: 0.9, up: 1.4, life: 0.35, color: kind === 'rock' || kind === 'crystal' ? '#fff2b0' : '#c98b4f' });
+    });
   }
 
   update(dt: number, state: GameState, rt: Runtime): void {
     this.track.update(dt);
     const frozen = rt.freeze > 0 || state.completed;
     const speed = frozen ? 0 : trainSpeed(state) * rt.boost.mult * 0.3;
-    this.syncTrain(state, dt, speed, rt.boost.mult, rt.cutHeat);
+    this.syncTrain(state, dt, speed, rt.boost.mult, rt.targets);
+    if (!frozen) this.cutSparks(state, rt, dt);
     this.forest.update(dt, state);
 
     // Asap lokomotif
