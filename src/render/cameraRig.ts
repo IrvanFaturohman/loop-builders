@@ -14,15 +14,18 @@ export interface SafeArea {
   yT: number;
 }
 
+/** Kamera menghadap diagonal grid (45°): rel lurus-siku tampil sebagai tangga miring. */
+const YAW = Math.PI / 4;
+
 export class CameraRig {
   readonly camera: THREE.PerspectiveCamera;
-  yaw = 0.26;
+  yaw = YAW;
   pitch = 0.93;
   private target = new THREE.Vector3();
   private distance = 30;
   private goalTarget = new THREE.Vector3();
   private goalDistance = 30;
-  private goalYaw = 0.26;
+  private goalYaw = YAW;
   private goalPitch = 0.93;
   private ease = 2.5;
   private bumpVel = 0;
@@ -44,7 +47,7 @@ export class CameraRig {
 
   /** Hitung framing yang memuat semua titik di area aman. */
   fit(points: THREE.Vector3[], safe: SafeArea, opts: { yaw?: number; pitch?: number; immediate?: boolean; ease?: number; orbit?: number } = {}): void {
-    const yaw = opts.yaw ?? 0.26;
+    const yaw = opts.yaw ?? YAW;
     const pitch = opts.pitch ?? 0.93;
     const cam = this.tmpCam;
     cam.fov = this.camera.fov;
@@ -134,7 +137,7 @@ export class CameraRig {
   follow(x: number, z: number, distance: number): void {
     this.goalTarget.set(x, 0, z);
     this.goalDistance = distance;
-    this.goalYaw = 0.22;
+    this.goalYaw = YAW;
     this.goalPitch = 0.95;
     this.ease = 3;
     this.orbitSpeed = 0;

@@ -6,7 +6,8 @@
  * kota, hanya selama pemain menahan/mengetuk layar. Susunannya lokomotif → satu gerbong
  * muatan → gerbong pemotong. Gerinda di sisi kiri pemotong (arah hutan) menggerus blok yang
  * menempel ke rel. Rel mengikuti baris hutan terdepan: begitu blok hancur, rel di titik itu
- * langsung maju, dan blok keras membuat rel berbelok mengitarinya. Muatan dibongkar di stasiun
+ * maju setelah kereta lewat (kereta tidak pernah tergeser), dan blok keras membuat rel berbelok
+ * mengitarinya. Muatan dibongkar di stasiun
  * dan langsung dipasang ke bangunan kota di belakang rel; setiap poin bahan menjadi koin.
  * Hutan tidak tumbuh kembali: total bahan di hutan sama persis dengan total kebutuhan kota.
  */
@@ -116,6 +117,27 @@ export interface Train {
   cargo: Cargo;
 }
 
+/** Bahan hasil potongan yang jatuh ke rel karena gerbong muatan penuh; dipungut saat gerbong lewat. */
+export interface RailItem {
+  /** Jarak di lintasan rel sekarang (ikut dipetakan saat rel berubah). */
+  d: number;
+  res: Resource;
+  amount: number;
+}
+
+/** Satu perjalanan truk pengantar: penyimpanan stasiun → depan kavling → kembali ke stasiun. */
+export interface TruckTrip {
+  plot: number;
+  /** Poin bahan yang dibawa (0 setelah dibongkar di kavling). */
+  load: number;
+  /** z titik berangkat (penyimpanan stasiun di sisi selatan) — rute = deliveryRoute(plot, {x: 0, z: startZ}). */
+  startZ: number;
+  /** Panjang rute sekali jalan. */
+  length: number;
+  /** Jarak tempuh: 0..length berangkat, length..2·length pulang. */
+  s: number;
+}
+
 export interface TutorialFlags {
   drive: boolean;
   add: boolean;
@@ -145,6 +167,10 @@ export interface GameState {
   stock: number;
   completed: boolean;
   train: Train;
+  /** Tumpukan bahan di rel yang menunggu dipungut gerbong muatan. */
+  railItems: RailItem[];
+  /** Truk yang sedang mengantar bahan dari penyimpanan stasiun (`stock`) ke bangunan. */
+  trucks: TruckTrip[];
   speedLevel: number;
   capacityLevel: number;
   addsPurchased: number;
@@ -176,4 +202,6 @@ export interface Runtime {
   fullTime: number;
   /** Sel yang sedang digerus tiap pemotong (-1 = tidak ada). Render membacanya untuk gerinda. */
   targets: number[];
+  /** Jarak tempuh kereta sejak rel terakhir diperiksa (lahan tertunda diterapkan tiap RAIL_CHECK). */
+  railCheck: number;
 }

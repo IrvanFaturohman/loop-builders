@@ -82,19 +82,42 @@ export function fieldFor(levelIndex: number): Field {
 export function initialBlocks(levelIndex: number): number[] {
   const f = fieldFor(levelIndex);
   const out: number[] = new Array(f.n);
-  for (let c = 0; c < f.n; c++) out[c] = f.kind[c] < 0 ? -1 : BALANCE.blocks[KINDS[f.kind[c]]].hp;
+  for (let c = 0; c < f.n; c++) out[c] = maxHp(f, c);
   return out;
 }
 
+/** HP penuh sebuah sel: HP jenis bloknya × pengali pitanya (makin ke luar makin keras). */
 export function maxHp(f: Field, c: number): number {
-  return f.kind[c] < 0 ? -1 : BALANCE.blocks[KINDS[f.kind[c]]].hp;
+  if (f.kind[c] < 0) return -1;
+  const mult = BALANCE.bandHp[Math.min(f.band[c], BALANCE.bandHp.length - 1)];
+  return BALANCE.blocks[KINDS[f.kind[c]]].hp * mult;
 }
 
-/** Poin bahan yang dihasilkan sel bila ditebang (0 untuk sel kosong). */
+/** Poin bahan total yang dihasilkan sel sampai habis (0 untuk sel kosong). */
 export function cellPoints(f: Field, c: number): number {
   if (f.kind[c] < 0) return 0;
   const def = BALANCE.blocks[KINDS[f.kind[c]]];
   return def.amount * BALANCE.points[def.res];
+}
+
+/**
+ * Unit bahan yang sudah keluar dari sel pada HP `hp`: bahan keluar sedikit demi sedikit seiring
+ * kerusakan (satu unit tiap HP turun sebesar max/amount), unit terakhir saat blok habis. Dihitung
+ * langsung dari HP, jadi tidak perlu disimpan.
+ */
+export function releasedUnits(f: Field, c: number, hp: number): number {
+  if (f.kind[c] < 0) return 0;
+  const amount = BALANCE.blocks[KINDS[f.kind[c]]].amount;
+  if (hp <= 0) return amount;
+  const lost = 1 - hp / maxHp(f, c);
+  return Math.max(0, Math.min(amount - 1, Math.floor(lost * amount + 1e-9)));
+}
+
+/** Poin bahan yang masih tersimpan di sel (belum keluar) pada HP `hp`. */
+export function remainingPoints(f: Field, c: number, hp: number): number {
+  if (f.kind[c] < 0) return 0;
+  const def = BALANCE.blocks[KINDS[f.kind[c]]];
+  return (def.amount - releasedUnits(f, c, hp)) * BALANCE.points[def.res];
 }
 
 /** Panggil cb untuk setiap sel yang pusatnya mungkin berada dalam radius r dari (px, pz). */

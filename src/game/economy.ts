@@ -111,6 +111,18 @@ export function capacity(state: GameState): number {
   return Math.round(BALANCE.capacity.base * Math.pow(BALANCE.capacity.growth, state.capacityLevel - 1));
 }
 
+/** Jumlah truk pengantar: bertambah satu untuk tiap distrik kota yang sudah terbuka. */
+export function truckCount(state: GameState): number {
+  const open = new Set<number>();
+  for (const p of plotsOf(state.levelIndex)) if (isPlotUnlocked(state, p.index)) open.add(p.district);
+  return BALANCE.truck.base + open.size;
+}
+
+/** Muatan satu truk pengantar per perjalanan (poin bahan), ikut naik bersama Kapasitas. */
+export function truckCapacity(state: GameState): number {
+  return Math.max(1, Math.round(capacity(state) * BALANCE.truck.capacityRatio));
+}
+
 export function cutterDps(level: number): number {
   return BALANCE.cutter.dps * Math.pow(BALANCE.cutter.growth, level - 1);
 }

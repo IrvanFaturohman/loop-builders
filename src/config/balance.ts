@@ -6,15 +6,21 @@ import type { BlockKind, Resource } from '../game/types';
  */
 export const BALANCE = {
   /** Kecepatan dasar kereta (unit dunia per detik) & kenaikan per level Kecepatan. */
-  speed: { base: 3.4, perLevel: 0.1, maxLevel: 20 },
+  speed: { base: 3.7, perLevel: 0.12, maxLevel: 20 },
   /** Kapasitas gerbong muatan dasar & pengali per level Kapasitas. */
-  capacity: { base: 26, growth: 1.3, maxLevel: 20 },
+  capacity: { base: 120, growth: 1.3, maxLevel: 20 },
   /**
    * Pemotong: kerusakan per detik pada satu blok (Lv1) & pengali per tingkat merge. Gerinda
    * menempel di sisi kiri gerbong (`side` dari garis tengah rel) dan memotong blok yang pusatnya
    * dalam `reach` dari pusat piringan. Hanya memotong selama kereta bergerak.
    */
-  cutter: { dps: 10, growth: 1.6, side: 0.55, reach: 0.95, reachPerLevel: 0.1 },
+  cutter: { dps: 10, growth: 2.5, side: 0.55, reach: 0.95, reachPerLevel: 0.1 },
+  /**
+   * Truk pengantar bahan dari penyimpanan stasiun ke bangunan: jumlah truk = `base` + jumlah
+   * distrik yang sudah terbuka (kota besar punya lebih banyak truk), kecepatan, dan muatan per
+   * perjalanan sebagai porsi kapasitas gerbong muatan (dalam poin bahan).
+   */
+  truck: { base: 2, speed: 4.5, capacityRatio: 0.2 },
   /** Jarak antar gerbong di rel. */
   wagonSpacing: 1.05,
   maxCutters: 12,
@@ -24,10 +30,10 @@ export const BALANCE = {
   drive: { tap: 0.45, tapMax: 1.2, accel: 7, decel: 6 },
 
   cost: {
-    add: { base: 10, growth: 1.55 },
-    merge: { base: 15, growth: 1.45 },
-    speed: { base: 20, growth: 1.6 },
-    capacity: { base: 20, growth: 1.6 },
+    add: { base: 40, growth: 1.38 },
+    merge: { base: 60, growth: 1.32 },
+    speed: { base: 80, growth: 1.6 },
+    capacity: { base: 80, growth: 1.6 },
   },
 
   /** Nilai poin bahan tiap unit muatan saat dipasang ke bangunan. */
@@ -37,13 +43,24 @@ export const BALANCE = {
   /** Bonus saat satu bangunan selesai, sebagai porsi dari biayanya. */
   buildBonus: 0.3,
 
-  /** Blok hutan: HP dan hasil tebang. Hutan tidak tumbuh kembali. */
+  /**
+   * Pengali HP blok per pita hutan (pita 0 = paling dalam). Satu pemotong Lv1 menggerus ±4,5 HP
+   * per lewat, jadi pohon hijau butuh 2 lewat (tahap rusaknya terlihat) dan pita luar butuh
+   * pemotong hasil Gabung serta lebih banyak pemotong — tanpa upgrade, pulau praktis tidak bisa
+   * dibersihkan. Hasil tebang tidak ikut naik (biaya kota tetap terkalibrasi).
+   */
+  bandHp: [1, 1.3, 1.6, 2, 2.4],
+  /**
+   * Blok hutan: HP dasar (dikali bandHp) dan jumlah unit bahannya. Bahan keluar sedikit demi
+   * sedikit selama digerus (≥ 4 unit per blok, jadi tiap tahap rusak mengeluarkan bahan), unit
+   * terakhir saat blok habis. Hutan tidak tumbuh kembali.
+   */
   blocks: {
-    tree: { hp: 2, res: 'wood', amount: 2 },
-    treeGold: { hp: 4, res: 'wood', amount: 3 },
-    treeRed: { hp: 7, res: 'wood', amount: 5 },
-    rock: { hp: 6, res: 'stone', amount: 3 },
-    crystal: { hp: 12, res: 'gem', amount: 1 },
+    tree: { hp: 8, res: 'wood', amount: 8 },
+    treeGold: { hp: 16, res: 'wood', amount: 12 },
+    treeRed: { hp: 28, res: 'wood', amount: 20 },
+    rock: { hp: 24, res: 'stone', amount: 12 },
+    crystal: { hp: 48, res: 'gem', amount: 4 },
   } as Record<BlockKind, { hp: number; res: Resource; amount: number }>,
 
   /** Pengali biaya upgrade & koin tiap putaran ulang daftar level. */

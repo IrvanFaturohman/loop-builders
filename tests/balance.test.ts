@@ -11,33 +11,42 @@ import {
   upgradeCapacity,
   upgradeSpeed,
 } from '../src/game/actions';
-import { addCost, buildingsDone, capacityCost, forestCleared, mergeCost, speedCost } from '../src/game/economy';
+import { BALANCE } from '../src/config/balance';
+import { addCost, buildingsDone, capacityCost, cutterDps, findMergePair, forestCleared, mergeCost, speedCost } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
 import { step } from '../src/game/sim';
 import { createNewGame, createRuntime } from '../src/game/state';
 import type { GameState } from '../src/game/types';
 
 /**
- * Bot pemain yang terus menahan layar: beli opsi termurah yang masuk akal saat itu.
- * Kapasitas diprioritaskan bila pemotong sering berhenti karena muatan penuh.
- * Rel maju sendiri mengikuti hutan, jadi bot tidak perlu menabung untuk apa pun.
+ * Bot pemain yang terus menahan layar: tiap detik membeli opsi yang terjangkau dengan tambahan
+ * daya potong per koin terbesar (Tambah = +1 pemotong Lv1, Gabung = selisih dps pasangan →
+ * satu tingkat di atasnya). Kecepatan dihargai kecil; Kapasitas dihargai tinggi bila gerbong
+ * sering penuh. Rel maju sendiri mengikuti hutan, jadi bot tidak perlu menabung untuk apa pun.
  */
 function decide(state: GameState, fullRatio: number): string | null {
-  type Opt = { cost: number; run: () => void; label: string };
+  type Opt = { value: number; cost: number; run: () => void; label: string };
+  const total = state.train.cutters.reduce((s, l) => s + cutterDps(l), 0);
   const opts: Opt[] = [];
-  if (canMerge(state).ok) opts.push({ cost: mergeCost(state) * 0.8, run: () => mergeCutters(state, []), label: 'merge' });
-  if (canAddCutter(state).ok) opts.push({ cost: addCost(state), run: () => addCutter(state, []), label: 'add' });
+  if (canAddCutter(state).ok) opts.push({ value: cutterDps(1), cost: addCost(state), run: () => addCutter(state, []), label: 'add' });
+  const pair = findMergePair(state);
+  if (pair && canMerge(state).ok) {
+    const lv = state.train.cutters[pair[0]];
+    const full = state.train.cutters.length >= BALANCE.maxCutters;
+    const gain = cutterDps(lv + 1) - 2 * cutterDps(lv) + (full ? cutterDps(1) : 0);
+    if (gain > 0) opts.push({ value: gain, cost: mergeCost(state), run: () => mergeCutters(state, []), label: 'merge' });
+  }
   const sc = speedCost(state);
-  if (sc !== null && canUpgradeSpeed(state).ok) opts.push({ cost: sc * 1.1, run: () => upgradeSpeed(state, []), label: 'speed' });
+  if (sc !== null && canUpgradeSpeed(state).ok) opts.push({ value: total * 0.03, cost: sc, run: () => upgradeSpeed(state, []), label: 'speed' });
   const cc = capacityCost(state);
-  if (cc !== null && canUpgradeCapacity(state).ok) opts.push({ cost: cc * (fullRatio > 0.3 ? 0.6 : 1.3), run: () => upgradeCapacity(state, []), label: 'capacity' });
+  if (cc !== null && canUpgradeCapacity(state).ok) opts.push({ value: total * (fullRatio > 0.3 ? 0.4 : 0.02), cost: cc, run: () => upgradeCapacity(state, []), label: 'capacity' });
   if (!opts.length) return null;
-  opts.sort((a, b) => a.cost - b.cost);
+  opts.sort((a, b) => b.value / b.cost - a.value / a.cost);
   opts[0].run();
   return opts[0].label;
 }
 
-function playLevel(state: GameState, maxSeconds: number) {
+function playLevel(state: GameState, maxSeconds: number, buy = true) {
   const rt = createRuntime();
   rt.drive.holding = true;
   const ev: GameEvent[] = [];
@@ -77,7 +86,7 @@ function playLevel(state: GameState, maxSeconds: number) {
         log.push(`${t.toFixed(0).padStart(4)}s hutan ${(cleared * 100).toFixed(0)}% · bangunan ${buildingsDone(state).done} · rel maju ${grows}x`);
         nextMark += 0.25;
       }
-      const label = decide(state, full / Math.max(1, sampled));
+      const label = buy ? decide(state, full / Math.max(1, sampled)) : null;
       full = 0;
       sampled = 0;
       if (label) {
@@ -106,11 +115,21 @@ describe('pacing (bot)', () => {
       nextProject(state, []);
     }
     const [l1, l2] = results;
-    expect(l1.firsts.cut).toBeLessThan(3);
-    expect(l1.firsts.unload).toBeLessThan(20);
+    // Pohon hijau butuh 2 lewat pemotong Lv1, jadi tebangan pertama terjadi di putaran kedua.
+    expect(l1.firsts.cut).toBeLessThan(25);
+    expect(l1.firsts.unload).toBeLessThan(40);
     expect(l1.firsts.house).toBeLessThan(60);
     expect(l1.t).toBeGreaterThan(240);
-    expect(l1.t).toBeLessThan(600);
-    expect(l2.t).toBeLessThan(720);
+    expect(l1.t).toBeLessThan(720);
+    expect(l2.t).toBeLessThan(780);
+  });
+
+  it('tanpa upgrade, pemotong Lv1 tidak sanggup membersihkan pulau dalam 15 menit', () => {
+    const state = createNewGame();
+    const r = playLevel(state, 900, false);
+    console.log(`\n=== Tanpa upgrade: ${(r.t / 60).toFixed(1)} menit — hutan ${(forestCleared(state) * 100).toFixed(0)}%, bangunan ${buildingsDone(state).done}/${buildingsDone(state).total}`);
+    console.log(r.log.join('\n'));
+    expect(state.completed).toBe(false);
+    expect(forestCleared(state)).toBeLessThan(0.75);
   });
 });

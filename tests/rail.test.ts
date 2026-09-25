@@ -3,7 +3,7 @@ import { LEVELS } from '../src/config/levels';
 import { plotsOf, trackOf } from '../src/game/economy';
 import type { GameEvent } from '../src/game/events';
 import { isPlotInside, railOf, updateRail } from '../src/game/rail';
-import { growRail } from '../src/game/sim';
+import { growRail, trainSpan } from '../src/game/sim';
 import { createNewGame, setupLevel } from '../src/game/state';
 import type { GameState } from '../src/game/types';
 import { cellPoints, fieldFor } from '../src/game/worldgen';
@@ -122,28 +122,55 @@ describe('rel lurus mengikuti baris hutan', () => {
     const rock = cellAt(state, 0.5, 6.5);
     for (let c = 0; c < f.n; c++) if (f.band[c] <= 1 && c !== rock) state.blocks[c] = 0;
     const ev: GameEvent[] = [];
-    expect(growRail(state, ev)).toBe(true);
+    expect(growRail(state, ev, false)).toBe(true);
     expect(state.blocks[rock]).toBe(0);
     expect(count(ev, 'harvest')).toBe(1);
     const harvested = ev.find((e) => e.type === 'harvest');
     expect(harvested && harvested.type === 'harvest' && harvested.points).toBe(cellPoints(f, rock));
   });
 
-  it('posisi kereta terjaga & kavling terbuka saat rel melewatinya', () => {
+  it('tumpukan bahan di rel ikut dipetakan saat rel maju (yang di bawah kereta tetap di tempat)', () => {
     const { state } = fresh();
     state.train.distance = trackOf(state).length * 0.6;
-    const angle = () => {
-      const p = trackOf(state).pointAt(state.train.distance);
-      return Math.atan2(p.z, p.x);
+    const t0 = trackOf(state);
+    const under = { d: t0.wrap(state.train.distance - 2), res: 'wood' as const, amount: 2 };
+    state.railItems = [under];
+    const before = t0.pointAt(under.d);
+    const f = fieldFor(0);
+    for (let c = 0; c < f.n; c++) if (f.band[c] <= 1) state.blocks[c] = 0;
+    expect(growRail(state, [])).toBe(true);
+    const after = trackOf(state).pointAt(under.d);
+    expect(after.x).toBeCloseTo(before.x, 3);
+    expect(after.z).toBeCloseTo(before.z, 3);
+    expect(under.d).toBeLessThan(trackOf(state).length);
+  });
+
+  it('rel di bawah kereta tidak berubah; lahan di dekat kereta menunggu kereta lewat', () => {
+    const { state } = fresh();
+    state.train.cutters = [1, 1, 1];
+    state.train.distance = trackOf(state).length * 0.6;
+    const at = (d: number) => trackOf(state).pointAt(d);
+    const carPoints = () => {
+      const sp = trainSpan(state);
+      return Array.from({ length: 41 }, (_, k) => at(sp.from + (k / 40) * sp.length));
     };
-    const a0 = angle();
+    const before = carPoints();
     const f = fieldFor(0);
     for (let c = 0; c < f.n; c++) if (f.band[c] <= 1) state.blocks[c] = 0;
     const ev: GameEvent[] = [];
     expect(growRail(state, ev)).toBe(true);
-    expect(Math.abs(angle() - a0)).toBeLessThan(0.2);
     expect(count(ev, 'railGrow')).toBe(1);
+    carPoints().forEach((p, k) => {
+      expect(p.x).toBeCloseTo(before[k].x, 3);
+      expect(p.z).toBeCloseTo(before[k].z, 3);
+    });
     const d1 = plotsOf(0).filter((p) => p.district === 1);
+    const waiting = d1.filter((p) => !isPlotInside(railOf(state), p.index));
+    expect(waiting.length).toBeGreaterThan(0);
+    expect(waiting.length).toBeLessThan(d1.length);
+    // Kereta menjauh → sisa lahan diterapkan, semua kavling distrik 1 terbuka.
+    state.train.distance = trackOf(state).wrap(state.train.distance + 15);
+    expect(growRail(state, ev)).toBe(true);
     for (const p of d1) expect(isPlotInside(railOf(state), p.index)).toBe(true);
     expect(count(ev, 'plotOpen')).toBeGreaterThanOrEqual(d1.length);
   });

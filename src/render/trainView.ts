@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { cbox, ccyl, colored, mergeFlat, place } from './geom';
 import { itemGeometry, type ItemKind } from './items';
+import { RAIL_TOP } from './railView';
 import { SHARED } from './palette';
 
 /** Warna bodi pemotong per tingkat (Lv1..Lv8). */
@@ -13,6 +14,8 @@ const DISC_POS = new THREE.Vector3(0, 0.36, -0.58);
 /** Geser maksimum gerinda ke arah blok yang sedang digerus (supaya terlihat menekan). */
 const DISC_PUSH = 0.14;
 const MAX_CARGO_ITEMS = 12;
+/** Kereta diangkat supaya dasar roda (y 0.01) berdiri di atas batang rel. */
+const WHEEL_LIFT = RAIL_TOP - 0.01;
 
 let locoGeo: THREE.BufferGeometry | null = null;
 let hopperGeo: THREE.BufferGeometry | null = null;
@@ -247,7 +250,7 @@ export class TrainView {
   }
 
   /**
-   * pointAt(d) & tangentAt(d) disuplai World (sudah termasuk morph rel saat rel maju).
+   * pointAt(d) & tangentAt(d) disuplai World (lintasan rel sekarang).
    * fill = 0..1 isi muatan; targets[k] = pusat blok yang digerus pemotong k (dunia) atau null.
    */
   update(
@@ -290,7 +293,7 @@ export class TrainView {
         if (this.popT > 0.45) this.popIndex = -1;
       }
       car.body.scale.set(1 + b * 0.5 + pop, 1 - b + pop, 1 + b * 0.5 + pop);
-      car.group.position.y = Math.abs(Math.sin(this.time * 14 + idx)) * 0.02 * Math.min(1, speed) + pop * 0.6;
+      car.group.position.y = WHEEL_LIFT + Math.abs(Math.sin(this.time * 14 + idx)) * 0.02 * Math.min(1, speed) + pop * 0.6;
       car.group.updateMatrixWorld();
     };
     placeCar(this.loco, locoD, -1);

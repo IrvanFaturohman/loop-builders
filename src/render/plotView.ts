@@ -35,10 +35,10 @@ export class PlotView {
     this.done = completedModules >= project.modules.length;
     this.doneT = this.done ? 1 : 0;
     this.lotMat = new THREE.MeshStandardMaterial({ color: this.done ? this.lawnColor : this.siteColor, roughness: 1 });
-    this.lot = new THREE.Mesh(cbox(1.95, 0.05, 1.75, '#ffffff', 0, 0.02, 0, 0.12), this.lotMat);
+    this.lot = new THREE.Mesh(cbox(plot.w - 0.05, 0.05, plot.d - 0.05, '#ffffff', 0, 0.02, 0, 0.12), this.lotMat);
     this.lot.receiveShadow = true;
     // Jalan setapak dari trotoar ke pintu.
-    const path = new THREE.Mesh(cbox(0.36, 0.055, 0.6, '#e9e2d2', 0, 0.025, 0.72, 0.03), SHARED.vertexStd);
+    const path = new THREE.Mesh(cbox(0.36, 0.055, 0.6, '#e9e2d2', 0, 0.025, plot.d / 2 - 0.18, 0.03), SHARED.vertexStd);
     path.receiveShadow = true;
     this.building = new BuildingView(project, completedModules);
     this.building.group.position.set(0, 0.04, -0.1);

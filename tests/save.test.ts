@@ -40,10 +40,15 @@ describe('save/load', () => {
     run(state, rt, 23.7);
     const s2 = deserialize(serialize(state))!;
     expect(s2).not.toBeNull();
-    const { blocks: b1, ...rest1 } = state;
-    const { blocks: b2, ...rest2 } = s2;
+    const { blocks: b1, railItems: i1, ...rest1 } = state;
+    const { blocks: b2, railItems: i2, ...rest2 } = s2;
     expect(rest2).toEqual(rest1);
     for (let i = 0; i < b1.length; i++) expect(b2[i]).toBeCloseTo(b1[i], 1);
+    expect(i2.length).toBe(i1.length);
+    i1.forEach((it, k) => {
+      expect(i2[k].d).toBeCloseTo(it.d, 1);
+      expect({ ...i2[k], d: 0 }).toEqual({ ...it, d: 0 });
+    });
   });
 
   it('save rusak / versi lama → null dan dicadangkan', () => {

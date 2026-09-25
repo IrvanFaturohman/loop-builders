@@ -18,6 +18,8 @@ export function createNewGame(): GameState {
     stock: 0,
     completed: false,
     train: { distance: 0, cutters: [1], cargo: { wood: 0, stone: 0, gem: 0 } },
+    railItems: [],
+    trucks: [],
     speedLevel: 1,
     capacityLevel: 1,
     addsPurchased: 0,
@@ -52,6 +54,8 @@ export function setupLevel(state: GameState, levelIndex: number, cycle: number):
   railOf(state);
   // Mulai tepat setelah stasiun.
   state.train = { distance: 0.5, cutters: [1], cargo: { wood: 0, stone: 0, gem: 0 } };
+  state.railItems = [];
+  state.trucks = [];
 }
 
 export function createRuntime(): Runtime {
@@ -60,5 +64,6 @@ export function createRuntime(): Runtime {
     cutHeat: 0,
     fullTime: 0,
     targets: [],
+    railCheck: 0,
   };
 }

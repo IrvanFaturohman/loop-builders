@@ -9,7 +9,7 @@ export const SAVE_KEY = 'loop-builders/train-save';
 export const SETTINGS_KEY = 'loop-builders/settings';
 export const CORRUPT_KEY = 'loop-builders/train-save-corrupt';
 /** Versi 5 = rel mengikuti baris hutan, kereta jalan dengan tap/tahan (save versi lama tidak dipakai lagi). */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 12;
 
 interface SaveFile {
   schema: number;
@@ -24,7 +24,9 @@ export interface Settings {
 export function serialize(state: GameState): string {
   // HP blok dibulatkan 2 desimal supaya save ringkas.
   const r2 = (v: number) => (v <= 0 ? v : Math.round(v * 100) / 100);
-  const compact = { ...state, blocks: state.blocks.map(r2) };
+  // Muatan truk yang masih di jalan dikembalikan ke penyimpanan (rute bergantung posisi stasiun saat itu).
+  const carried = state.trucks.reduce((sum, t) => sum + t.load, 0);
+  const compact = { ...state, stock: state.stock + carried, trucks: [], blocks: state.blocks.map(r2), railItems: state.railItems.map((it) => ({ ...it, d: r2(it.d) })) };
   const file: SaveFile = { schema: SCHEMA_VERSION, savedAt: Date.now(), state: compact };
   return JSON.stringify(file);
 }
@@ -67,6 +69,8 @@ export function deserialize(raw: string): GameState | null {
       cutters: s.train.cutters.filter(isInt).map((l) => Math.max(1, Math.min(BALANCE.maxCutterLevel, l))).slice(0, BALANCE.maxCutters).sort((a, b) => b - a),
       cargo: { wood: 0, stone: 0, gem: 0 },
     },
+    railItems: [],
+    trucks: [],
     speedLevel: clampLv(s.speedLevel, BALANCE.speed.maxLevel),
     capacityLevel: clampLv(s.capacityLevel, BALANCE.capacity.maxLevel),
     addsPurchased: isInt(s.addsPurchased) ? Math.max(0, s.addsPurchased) : 0,
@@ -103,6 +107,12 @@ export function deserialize(raw: string): GameState | null {
     const v = isNum(c[k]) ? Math.max(0, Math.floor(c[k])) : 0;
     state.train.cargo[k] = Math.min(v, room);
     room -= state.train.cargo[k];
+  }
+  // Tumpukan bahan di rel: hanya entri yang valid, posisinya dibungkus ke lintasan sekarang.
+  const items = Array.isArray(s.railItems) ? s.railItems : [];
+  for (const it of items) {
+    if (!it || !isNum(it.d) || !isInt(it.amount) || it.amount <= 0 || !['wood', 'stone', 'gem'].includes(it.res)) continue;
+    state.railItems.push({ d: track.wrap(it.d), res: it.res, amount: it.amount });
   }
   return state;
 }

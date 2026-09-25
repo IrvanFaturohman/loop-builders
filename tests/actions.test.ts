@@ -62,7 +62,7 @@ describe('level berikutnya', () => {
     expect(state.stock).toBe(0);
     expect(state.plots.every((p) => p === 0)).toBe(true);
     rt.drive.holding = true;
-    const ev = run(state, rt, 6);
+    const ev = run(state, rt, 25);
     expect(count(ev, 'cut')).toBeGreaterThan(0);
     expect(plotTarget(state, 0)).toBeGreaterThan(0);
   });

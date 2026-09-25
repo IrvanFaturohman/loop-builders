@@ -1,5 +1,6 @@
 import { finalizeProject } from '../../game/building';
 import type { FinalProject, MaterialKind, ModuleDef } from '../../game/types';
+import { clinic, fireStation, library, market, policeStation, restaurant, school, sportsField, townHall } from './civic';
 import { house } from './house';
 import { clockTower, waterTower } from './special';
 
@@ -10,6 +11,8 @@ import { clockTower, waterTower } from './special';
 export interface BuildingType {
   name: string;
   material: MaterialKind;
+  /** Jumlah slot kavling yang dipakai (2 = gedung besar selebar satu blok). */
+  size?: number;
   build(variant: number): ModuleDef[];
 }
 
@@ -117,6 +120,38 @@ export const BUILDINGS: Record<string, BuildingType> = {
     build: (v) => clockTower(pick(['#c9563c', '#b5523f'], v), pick(['#2f8f8c', '#4b5563'], v)),
   },
 };
+
+// --- Gedung umum -------------------------------------------------------------------------
+Object.assign(BUILDINGS, {
+  'balai-desa': { name: 'Balai Desa', material: 'wood', size: 2, build: (v: number) => townHall('log', pick(LOGS, v), pick(ROOFS, v)) },
+  sekolah: { name: 'Sekolah', material: 'wood', size: 2, build: (v: number) => school('plank', pick([['#f3d192', '#e7c27f'], ['#f6e7c8', '#ecd9b0']], v), pick(ROOFS, v)) },
+  pasar: { name: 'Pasar', material: 'wood', size: 2, build: (v: number) => market(v % 2 ? ['#ff5a5f', '#3d9bff', '#ffcf3a', '#2fbf71'] : ['#2fbf71', '#ff8a3d', '#6c7bd6', '#ff5a8a']) },
+  'lapangan-bola': { name: 'Lapangan Bola', material: 'wood', size: 2, build: (v: number) => sportsField(pick(['#c98b4f', '#b8743f'], v), false) },
+  puskesmas: { name: 'Puskesmas', material: 'wood', build: (v: number) => clinic(false, pick([['#2fbf71', '#27a862'], ['#3d9bff', '#2f86e0']], v)) },
+  'rumah-makan': {
+    name: 'Rumah Makan',
+    material: 'wood',
+    build: (v: number) => restaurant('plank', pick([['#ffd66b', '#f5c64f'], ['#9fdcc0', '#86cfae']], v), pick([['#ff5a5f', '#ffffff'], ['#2fbf71', '#ffffff']], v), pick(['#d9534a', '#2f7d5b'], v)),
+  },
+  pemadam: { name: 'Pos Pemadam', material: 'wood', build: () => fireStation('plank') },
+  'balai-kota': { name: 'Balai Kota', material: 'brick', size: 2, build: (v: number) => townHall('brick', pick(BRICK, v), pick([['#4b5563', '#3d4452'], ['#2f8f8c', '#277a78']], v)) },
+  'sekolah-bata': { name: 'Sekolah', material: 'brick', size: 2, build: (v: number) => school('brick', pick(BRICK, v + 1), pick([['#e05a42', '#cc4a34'], ['#4b5563', '#3d4452']], v)) },
+  'rumah-sakit': { name: 'Rumah Sakit', material: 'brick', size: 2, build: (v: number) => clinic(true, pick([['#2fbf71', '#27a862']], v)) },
+  stadion: { name: 'Stadion', material: 'brick', size: 2, build: (v: number) => sportsField(pick(['#6c7bd6', '#e05a42'], v), true) },
+  restoran: {
+    name: 'Restoran',
+    material: 'brick',
+    build: (v: number) => restaurant('brick', pick(BRICK, v + 2), pick([['#ffcf3a', '#ffffff'], ['#3d9bff', '#ffffff'], ['#ff8fb1', '#ffffff']], v), pick(['#1f4e79', '#8a4b2a', '#6a4fd9'], v)),
+  },
+  perpustakaan: { name: 'Perpustakaan', material: 'brick', build: (v: number) => library(pick(BRICK, v + 3)) },
+  'kantor-polisi': { name: 'Kantor Polisi', material: 'brick', build: () => policeStation() },
+  'pemadam-bata': { name: 'Pemadam Kebakaran', material: 'brick', build: () => fireStation('brick') },
+} satisfies Record<string, BuildingType>);
+
+/** Jumlah slot kavling sebuah tipe bangunan (1 = biasa, 2 = gedung besar). */
+export function buildingSize(type: string): number {
+  return BUILDINGS[type]?.size ?? 1;
+}
 
 const cache = new Map<string, FinalProject>();
 

@@ -59,6 +59,7 @@ export class App {
     this.world = new World(this.canvas, document.getElementById('labels')!, {
       onModulePop: (i) => this.sfx.modulePop(i),
       onCut: (kind) => this.sfx.chop(kind),
+
     });
     this.hud = new Hud({
       add: () => this.act(addCutter(this.state, this.events)),
@@ -155,6 +156,7 @@ export class App {
           }
           break;
         case 'deliver':
+          // Terjadi saat truk tiba di bangunan.
           this.sfx.rent();
           this.hud.moneyGain(e.money);
           this.requestSave(1.5);

@@ -1,7 +1,7 @@
 import { LEVELS } from '../config/levels';
-import { districtCount, LOT_D, LOT_W, plotsOfLevel } from './layout';
+import { districtCount, plotsOfLevel } from './layout';
 import { buildStageMapping, StageMapping, TrackPath } from './track';
-import type { GameState } from './types';
+import type { GameState, Vec2 } from './types';
 import { CELL, fieldFor, type Field } from './worldgen';
 
 /**
@@ -19,13 +19,35 @@ import { CELL, fieldFor, type Field } from './worldgen';
  *
  * Blok hidup yang terkurung di dalam F (lubang) tidak bisa lagi disentuh rel; sim.ts
  * membongkarnya otomatis ke gudang. Karena blok hanya bisa hancur, F hanya bisa membesar:
- * rel hanya pernah maju keluar. Rel tidak disimpan — selalu dihitung ulang dari blok.
+ * rel hanya pernah maju keluar.
+ *
+ * Selama main, rel di bawah kereta tidak boleh berubah (kereta tidak boleh tergeser): lahan baru
+ * di dekat kereta ditunda dan baru masuk F setelah kereta lewat (updateRail dengan RailSpan).
+ * Rel tidak disimpan — saat dimuat ulang dihitung dari blok dengan semua tundaan diterapkan.
  */
 
-/** Radius lengkung belokan siku ke arah kota (sudut cembung). */
-const TURN_R = 0.32;
-/** Radius belokan ke arah hutan (sudut cekung): lebih rapat supaya tidak menyerempet blok. */
-const TURN_R_IN = 0.18;
+/**
+ * Radius lengkung belokan siku: setengah sel, jadi garis tengah ubin belok adalah seperempat
+ * lingkaran penuh dari tepi ke tepi sel, dan tangga rel selebar satu sel menjadi lengkung S.
+ */
+export const TURN_R = 0.5;
+/**
+ * Jarak Chebyshev (sel) dari kereta tempat lahan baru ditunda. Dicoba berurutan: yang kecil
+ * membuat rel berubah tepat di belakang kereta; yang besar cadangan bila perubahan (jepitan,
+ * lubang terisi) ternyata masih menyentuh rel di bawah kereta.
+ */
+const KEEP_OUT = [1.6, 2.6, 3.6];
+
+/** Satu ubin rel: pusat sel yang dilewati rel, arah masuk, dan beloknya di sel itu. */
+export interface RailTile {
+  cell: number;
+  x: number;
+  z: number;
+  /** Arah masuk: 0 = +x, 1 = +z, 2 = -x, 3 = -z. */
+  dir: number;
+  /** 0 = lurus, 1 = belok kanan (ke arah kota), -1 = belok kiri (ke hutan). */
+  turn: number;
+}
 
 export interface Rail {
   levelIndex: number;
@@ -34,6 +56,21 @@ export interface Rail {
   /** Jarak Chebyshev (dalam sel) ke sel di luar rel: 1 = sel yang dilewati rel. 0 = di luar. */
   depth: Uint8Array;
   track: TrackPath;
+  /** Ubin rel searah jalan, mulai tepat setelah stasiun. */
+  tiles: RailTile[];
+}
+
+/** Bagian lintasan rel sekarang yang ditempati kereta: dari jarak `from` sepanjang `length` searah jalan. */
+export interface RailSpan {
+  from: number;
+  length: number;
+}
+
+export interface RailChange {
+  from: Rail;
+  to: Rail;
+  /** Jarak di rel lama → jarak di rel baru (bagian di bawah kereta dipetakan 1:1). */
+  map: StageMapping;
 }
 
 interface Base {
@@ -57,10 +94,13 @@ function baseFor(levelIndex: number): Base {
   const plotCells = plotsOfLevel(levelIndex).map((pl) => {
     const t = { x: -pl.facing.z, z: pl.facing.x };
     const cells = new Set<number>();
-    for (const a of [-1, -0.5, 0, 0.5, 1])
+    // Titik periksa rapat (≤ 0,5 satuan) supaya kavling besar pun tidak melewatkan sel.
+    const na = Math.ceil(pl.w / 0.5);
+    for (let i = 0; i <= na; i++)
       for (const k of [-1, 0, 1]) {
-        const x = pl.pos.x + ((t.x * a * LOT_W) / 2) * 0.98 + ((pl.facing.x * k * LOT_D) / 2) * 0.98;
-        const z = pl.pos.z + ((t.z * a * LOT_W) / 2) * 0.98 + ((pl.facing.z * k * LOT_D) / 2) * 0.98;
+        const a = (i / na) * 2 - 1;
+        const x = pl.pos.x + ((t.x * a * pl.w) / 2) * 0.98 + ((pl.facing.x * k * pl.d) / 2) * 0.98;
+        const z = pl.pos.z + ((t.z * a * pl.w) / 2) * 0.98 + ((pl.facing.z * k * pl.d) / 2) * 0.98;
         cells.add(cellAt(x, z));
       }
     return [...cells];
@@ -94,13 +134,9 @@ function flood(f: Field, start: number, ok: (c: number) => boolean): Uint8Array 
   return out;
 }
 
-/** Lahan di dalam rel (F) untuk kondisi blok sekarang. */
-function computeInside(levelIndex: number, blocks: readonly number[]): Uint8Array {
-  const f = fieldFor(levelIndex);
-  const b = baseFor(levelIndex);
+/** Opening 3×3 (erosi lalu dilatasi): hanya sisa daerah yang dilalui kotak 3×3 utuh. */
+function open3(f: Field, E: Uint8Array): Uint8Array {
   const cols = f.cols;
-  const E = flood(f, b.center, (c) => b.island[c] === 1 && blocks[c] <= 0);
-  // Opening 3×3: erosi lalu dilatasi.
   const core = new Uint8Array(f.n);
   for (let j = 1; j < cols - 1; j++)
     for (let i = 1; i < cols - 1; i++) {
@@ -114,7 +150,14 @@ function computeInside(levelIndex: number, blocks: readonly number[]): Uint8Arra
       if (!core[j * cols + i]) continue;
       for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) open[(j + dj) * cols + i + di] = 1;
     }
-  const comp = flood(f, b.center, (c) => open[c] === 1);
+  return open;
+}
+
+/** Komponen `cells` yang memuat pusat, lubangnya diisi. */
+function closeRegion(levelIndex: number, cells: Uint8Array): Uint8Array {
+  const f = fieldFor(levelIndex);
+  const cols = f.cols;
+  const comp = flood(f, baseFor(levelIndex).center, (c) => cells[c] === 1);
   // Isi lubang: sel luar = tersambung 4-arah ke tepi peta tanpa melewati comp.
   const outside = new Uint8Array(f.n);
   const q: number[] = [];
@@ -139,6 +182,36 @@ function computeInside(levelIndex: number, blocks: readonly number[]): Uint8Arra
   const inside = new Uint8Array(f.n);
   for (let c = 0; c < f.n; c++) inside[c] = outside[c] ? 0 : 1;
   return inside;
+}
+
+/** Lahan di dalam rel (F) untuk kondisi blok sekarang, tanpa tundaan. */
+function computeInside(levelIndex: number, blocks: readonly number[]): Uint8Array {
+  const f = fieldFor(levelIndex);
+  const b = baseFor(levelIndex);
+  const E = flood(f, b.center, (c) => b.island[c] === 1 && blocks[c] <= 0);
+  return closeRegion(levelIndex, open3(f, E));
+}
+
+/**
+ * F yang boleh dipakai sekarang: F lama ditambah lahan target yang jauhnya ≥ keep sel (Chebyshev)
+ * dari semua titik kereta. Tambahan tetap harus selebar kotak 3×3 bersama F lama.
+ */
+function growAway(levelIndex: number, applied: Uint8Array, target: Uint8Array, avoid: readonly Vec2[], keep: number): Uint8Array {
+  const f = fieldFor(levelIndex);
+  const allowed = Uint8Array.from(applied);
+  for (let c = 0; c < f.n; c++) {
+    if (applied[c] || !target[c]) continue;
+    let near = false;
+    for (const p of avoid)
+      if (Math.abs(f.x[c] - p.x) < keep && Math.abs(f.z[c] - p.z) < keep) {
+        near = true;
+        break;
+      }
+    if (!near) allowed[c] = 1;
+  }
+  const open = open3(f, allowed);
+  for (let c = 0; c < f.n; c++) open[c] |= applied[c];
+  return closeRegion(levelIndex, open);
 }
 
 /** Jarak Chebyshev (sel) ke sel luar, dibatasi 4. */
@@ -168,7 +241,7 @@ function computeDepth(f: Field, inside: Uint8Array): Uint8Array {
  * Keliling F lewat pusat sel tepi, searah jarum jam (x kanan, z bawah), mulai di tengah sisi
  * bawah (x = 0, tempat stasiun). Kisi: persegi (i, j) menghubungkan pusat sel (i..i+1, j..j+1).
  */
-function traceRail(levelIndex: number, inside: Uint8Array): TrackPath {
+function traceRail(levelIndex: number, inside: Uint8Array): { track: TrackPath; tiles: RailTile[] } {
   const f = fieldFor(levelIndex);
   const cols = f.cols;
   const L = cols - 1; // jumlah persegi kisi per baris
@@ -276,7 +349,7 @@ function traceRail(levelIndex: number, inside: Uint8Array): TrackPath {
   const wx = (k: number) => f.x[k];
   const wz = (k: number) => f.z[k * cols];
   const corners: [number, number][] = [[0, wz(j0)]];
-  const radii: number[] = [0];
+  const tiles: RailTile[] = [];
   const n = pts.length;
   // pts[0] berada tepat setelah titik stasiun searah jalan mundur, jadi diperiksa paling akhir.
   for (let m = 1; m <= n; m++) {
@@ -289,16 +362,17 @@ function traceRail(levelIndex: number, inside: Uint8Array): TrackPath {
     const vx = ni - ci;
     const vz = nj - cj;
     const cross = ux * vz - uz * vx;
+    const dir = ux > 0 ? 0 : uz > 0 ? 1 : ux < 0 ? 2 : 3;
+    tiles.push({ cell: cj * cols + ci, x: wx(ci), z: wz(cj), dir, turn: Math.sign(cross) });
     if (cross === 0) continue;
     corners.push([wx(ci), wz(cj)]);
-    radii.push(cross > 0 ? TURN_R : TURN_R_IN);
   }
-  return new TrackPath({ corners, radius: TURN_R, radii });
+  return { track: new TrackPath({ corners, radius: TURN_R }), tiles };
 }
 
-function makeRail(levelIndex: number, blocks: readonly number[]): Rail {
-  const inside = computeInside(levelIndex, blocks);
-  return { levelIndex, inside, depth: computeDepth(fieldFor(levelIndex), inside), track: traceRail(levelIndex, inside) };
+function makeRail(levelIndex: number, inside: Uint8Array): Rail {
+  const { track, tiles } = traceRail(levelIndex, inside);
+  return { levelIndex, inside, depth: computeDepth(fieldFor(levelIndex), inside), track, tiles };
 }
 
 const railCache = new WeakMap<GameState, Rail>();
@@ -307,7 +381,7 @@ const railCache = new WeakMap<GameState, Rail>();
 export function railOf(state: GameState): Rail {
   let r = railCache.get(state);
   if (!r || r.levelIndex !== state.levelIndex) {
-    r = makeRail(state.levelIndex, state.blocks);
+    r = makeRail(state.levelIndex, computeInside(state.levelIndex, state.blocks));
     railCache.set(state, r);
   }
   return r;
@@ -318,34 +392,66 @@ export function resetRail(state: GameState): void {
   railCache.delete(state);
 }
 
-/**
- * Hitung ulang rel setelah ada blok hancur. Mengembalikan rel lama & baru bila lahan di dalam
- * rel berubah (pemanggil memetakan posisi kereta dan memancarkan event), atau null.
- */
-export function updateRail(state: GameState): { from: Rail; to: Rail } | null {
-  const from = railOf(state);
-  const inside = computeInside(state.levelIndex, state.blocks);
-  let changed = false;
-  for (let c = 0; c < inside.length && !changed; c++) if (inside[c] !== from.inside[c]) changed = true;
-  if (!changed) return null;
-  const to: Rail = { levelIndex: state.levelIndex, inside, depth: computeDepth(fieldFor(state.levelIndex), inside), track: traceRail(state.levelIndex, inside) };
-  railCache.set(state, to);
-  return { from, to };
+function sameCells(a: Uint8Array, b: Uint8Array): boolean {
+  for (let c = 0; c < a.length; c++) if (a[c] !== b[c]) return false;
+  return true;
 }
 
-/** Peta jarak lintasan rel `a` → rel `b`: bagian yang sama dipetakan 1:1, sisanya proporsional. */
-export function railMapping(a: Rail, b: Rail): StageMapping {
-  return buildStageMapping(a.track, b.track);
+/** Titik-titik rel `track` sepanjang span, tiap `step`. */
+function spanPoints(track: TrackPath, span: RailSpan, step: number): Vec2[] {
+  const n = Math.max(1, Math.ceil(span.length / step));
+  const out: Vec2[] = [];
+  for (let k = 0; k <= n; k++) out.push(track.pointAt(span.from + (k / n) * span.length));
+  return out;
+}
+
+/** Rel di sepanjang span tetap persis di tempat yang sama setelah dipetakan ke rel baru. */
+function keepsSpan(from: TrackPath, to: TrackPath, map: StageMapping, span: RailSpan): boolean {
+  const a = { x: 0, z: 0 };
+  const b = { x: 0, z: 0 };
+  const n = Math.max(1, Math.ceil(span.length / 0.1));
+  for (let k = 0; k <= n; k++) {
+    const d = from.wrap(span.from + (k / n) * span.length);
+    from.pointAt(d, a);
+    to.pointAt(map.map(d), b);
+    if (Math.hypot(a.x - b.x, a.z - b.z) > 1e-3) return false;
+  }
+  return true;
+}
+
+/**
+ * Hitung ulang rel setelah ada blok hancur atau kereta bergerak. Mengembalikan perubahan bila
+ * lahan di dalam rel bertambah (pemanggil memetakan posisi kereta dan memancarkan event), atau null.
+ * Dengan `span`, rel di bagian itu (tempat kereta) dijamin tidak berubah: lahan di dekatnya
+ * ditunda sampai kereta lewat.
+ */
+export function updateRail(state: GameState, span?: RailSpan): RailChange | null {
+  const from = railOf(state);
+  const li = state.levelIndex;
+  const target = computeInside(li, state.blocks);
+  if (sameCells(target, from.inside)) return null;
+  if (!span) {
+    const to = makeRail(li, target);
+    railCache.set(state, to);
+    return { from, to, map: buildStageMapping(from.track, to.track) };
+  }
+  const avoid = spanPoints(from.track, span, 0.25);
+  const ends = [avoid[0], avoid[avoid.length - 1]];
+  for (const keep of KEEP_OUT) {
+    const inside = growAway(li, from.inside, target, avoid, keep);
+    if (sameCells(inside, from.inside)) return null;
+    const to = makeRail(li, inside);
+    const map = buildStageMapping(from.track, to.track, ends);
+    if (!keepsSpan(from.track, to.track, map, span)) continue;
+    railCache.set(state, to);
+    return { from, to, map };
+  }
+  return null;
 }
 
 /** Kavling sudah di dalam rel dengan jarak aman (≥ 2 sel) dari rel. */
 export function isPlotInside(rail: Rail, plot: number): boolean {
   return baseFor(rail.levelIndex).plotCells[plot].every((c) => rail.depth[c] >= 3);
-}
-
-/** Sel sudah berada di belakang rel (lahan kota). */
-export function isCellInside(rail: Rail, c: number): boolean {
-  return rail.depth[c] >= 2;
 }
 
 /** Blok hidup yang terkurung di dalam rel (tidak bisa lagi disentuh gerinda). */

@@ -5,21 +5,23 @@ import { completedModuleCount } from '../game/building';
 import { capacity, cargoTotal, isPlotComplete, isPlotUnlocked, plotProject, plotTarget, plotsOf, trainSpeed } from '../game/economy';
 import type { GameEvent } from '../game/events';
 import { islandBounds, type ResolvedPlot } from '../game/layout';
-import { railMapping, railOf, type Rail } from '../game/rail';
+import { railOf, type Rail } from '../game/rail';
 import type { GameState, LevelDefinition, Runtime } from '../game/types';
 import { fieldFor, KINDS } from '../game/worldgen';
 import { fmt } from '../ui/format';
 import { CameraRig, type SafeArea } from './cameraRig';
 import { CityView } from './cityView';
 import { Effects } from './effects';
-import { buildEnvironment, type EnvironmentBuild } from './environment';
-import { ForestView } from './forestView';
-import { cbox, ccyl, mergeFlat } from './geom';
-import type { ItemKind } from './items';
+import { SeaView } from './seaView';
+import { TruckFleet } from './truckView';
+import { chipColor, ForestView } from './forestView';
+import { cbox, mergeFlat } from './geom';
+import { itemGeometry, type ItemKind } from './items';
 import { LabelLayer, type WorldLabel } from './labels';
 import { SHARED, THEMES } from './palette';
 import { PlotView } from './plotView';
-import { TrackView } from './trackView';
+import { DROP_FLY, RailItemsView } from './railItemsView';
+import { RailView } from './railView';
 import { TrainView } from './trainView';
 
 export interface WorldHooks {
@@ -34,38 +36,62 @@ interface Float {
   amount: number;
 }
 
-/** Durasi morph rel setiap kali maju (kecil & sering). */
-const RAIL_MORPH = 0.3;
+/** Lama lompatan stasiun ke posisi rel yang baru. */
+const STATION_HOP = 0.4;
 const MAX_FLOATS = 16;
 /** Leaf/serpihan per jenis blok saat tumbang. */
-const CHIP_COLORS: Record<string, string> = { tree: '#6ccf58', treeGold: '#ffd24a', treeRed: '#f06a55', rock: '#b7bdc6', crystal: '#ff7a8f' };
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+/** Skala balok di tumpukan penyimpanan. */
+const _sc = new THREE.Matrix4().makeScale(0.55, 0.55, 0.55);
 
-/** Titik atap gudang stasiun (lokal) — tujuan muatan yang dibongkar & asal bahan ke kota. */
-const DEPOT = new THREE.Vector3(0, 1.25, -1.5);
 
 /**
  * Stasiun (lokal, alas di y=0, pusat di garis tengah rel, -z = ke dalam loop):
  * kanopi di atas rel yang dilewati kereta, dan gudang di sisi dalam dengan corong kuning.
  */
+/** Pusat palet penyimpanan (lokal stasiun): di kiri jalan raya, truk memuat di sebelahnya. */
+const STORAGE = new THREE.Vector3(-1.1, 0.1, -1.45);
+/** Poin bahan per balok yang terlihat di tumpukan penyimpanan & batas tumpukan. */
+const PILE_POINTS = 10;
+const PILE_COLS = 4;
+const PILE_ROWS = 4;
+const PILE_LAYERS = 4;
+
+/**
+ * Stasiun tanpa atap: peron di sisi dalam rel dan halaman penyimpanan terbuka (palet kayu,
+ * pagar rendah, papan nama). Tumpukan bahan di atas palet digambar terpisah sesuai isi gudang.
+ */
 function stationGeometry(): THREE.BufferGeometry {
-  const post = '#5b6a80';
-  return mergeFlat([
-    // kanopi dari sisi dalam, menjorok di atas rel (tidak menutupi baris hutan di sisi luar)
-    ...[-0.95, 0.95].map((x) => ccyl(0.06, 1.4, post, 8, x, 0.7, -0.78)),
-    cbox(2.3, 0.1, 1.35, '#e0463a', 0, 1.45, -0.2, 0.04),
-    cbox(2.1, 0.06, 1.2, '#f6e7c8', 0, 1.38, -0.2, 0.03),
-    cbox(0.9, 0.34, 0.06, '#2f8f8c', 0, 1.7, -0.3, 0.04),
-    // peron & gudang di sisi dalam
+  const x = STORAGE.x;
+  const z = STORAGE.z;
+  const parts: THREE.BufferGeometry[] = [
+    // peron di sisi dalam rel
     cbox(2.2, 0.12, 0.5, '#d9d4c8', 0, 0.06, -0.72, 0.03),
-    cbox(1.9, 0.12, 1.3, '#d9d4c8', 0, 0.06, -1.5, 0.05),
-    cbox(1.5, 0.8, 1.0, '#7f8ea3', 0, 0.52, -1.5, 0.1),
-    cbox(1.62, 0.1, 1.12, '#6b7a8f', 0, 0.96, -1.5, 0.04),
-    cbox(1.1, 0.3, 0.8, '#ffc93c', 0, 1.14, -1.5, 0.08),
-    cbox(0.7, 0.08, 0.5, '#3a3f4b', 0, 1.3, -1.5, 0.03),
-    cbox(0.5, 0.5, 0.05, '#5b6a80', 0, 0.37, -0.99, 0.04),
-  ]);
+    // palet penyimpanan
+    cbox(1.4, 0.06, 1.1, '#8a5a36', x, 0.03, z, 0.02),
+    ...[-0.42, -0.14, 0.14, 0.42].map((dz) => cbox(1.36, 0.04, 0.2, '#b98246', x, 0.08, z + dz, 0.01)),
+    // papan nama gudang
+    cbox(0.06, 0.6, 0.06, '#6b4a2b', x - 0.72, 0.3, z + 0.58, 0.01),
+    cbox(0.5, 0.2, 0.04, '#2f7d5b', x - 0.52, 0.56, z + 0.58, 0.02),
+  ];
+  // pagar rendah di tiga sisi (sisi jalan raya terbuka untuk truk)
+  for (const [px, pz, w, d] of [
+    [x - 0.72, z, 0.04, 1.14],
+    [x, z - 0.57, 1.44, 0.04],
+    [x, z + 0.57, 1.44, 0.04],
+  ]) {
+    parts.push(cbox(w, 0.04, d, '#c89660', px, 0.22, pz, 0.005), cbox(w, 0.04, d, '#c89660', px, 0.12, pz, 0.005));
+  }
+  for (const [px, pz] of [
+    [x - 0.72, z - 0.57],
+    [x - 0.72, z + 0.57],
+    [x + 0.72, z - 0.57],
+    [x + 0.72, z + 0.57],
+  ])
+    parts.push(cbox(0.06, 0.3, 0.06, '#8a5a36', px, 0.15, pz, 0.01));
+  return mergeFlat(parts);
 }
 
 export class World {
@@ -79,7 +105,10 @@ export class World {
   private levelRoot = new THREE.Group();
   private level!: LevelDefinition;
   private plotsDef: ResolvedPlot[] = [];
-  private track!: TrackView;
+  private track!: RailView;
+  private stationHop: { x: number; z: number; rot: number; t: number } | null = null;
+  private pile!: THREE.InstancedMesh;
+  private pileShown = -1;
   private forest!: ForestView;
   private train!: TrainView;
   private station!: THREE.Group;
@@ -88,7 +117,9 @@ export class World {
   private plotLabels: WorldLabel[] = [];
   private cargoLabel!: WorldLabel;
   private wagonLabels: WorldLabel[] = [];
-  private env: EnvironmentBuild | null = null;
+  private sea: SeaView | null = null;
+  private trucks: TruckFleet | null = null;
+  private railItems: RailItemsView | null = null;
   private floats: Float[] = [];
   private smokeTimer = 0;
   private city!: CityView;
@@ -143,21 +174,23 @@ export class World {
     this.itemKind = this.level.material === 'brick' ? 'stone' : 'wood';
     const palette = THEMES[this.level.theme];
     this.scene.background = new THREE.Color(palette.sky);
-    this.scene.fog = new THREE.Fog(palette.fog, 40, 110);
+    // Kabut sewarna langit: laut memudar ke cakrawala.
+    this.scene.fog = new THREE.Fog(palette.sky, 40, 110);
 
-    // Rel
+    // Rel (alasnya sewarna tanah hutan)
+    const soil = this.level.theme === 'meadow' ? '#caa672' : '#c79a62';
     this.rail = railOf(state);
-    this.track = new TrackView(palette, this.rail.track, [], { gate: false, style: 'rail' });
+    this.track = new RailView(this.rail, soil);
+    this.track.onLand = (x, z) => this.effects.puff(_v.set(x, 0.1, z), { count: 2, size: 0.22, spread: 0.8, up: 0.5, life: 0.4, color: '#d9cfbf' });
     this.levelRoot.add(this.track.group);
 
     // Hutan
-    this.forest = new ForestView(state.levelIndex, this.level.theme === 'meadow' ? '#caa672' : '#c79a62');
+    this.forest = new ForestView(state.levelIndex, soil);
     this.levelRoot.add(this.forest.group);
 
     // Tanah kota di dalam rel (tumbuh tiap rel melebar) & stasiun di rel
-    this.city = new CityView(this.level, this.rail);
+    this.city = new CityView(this.rail);
     this.levelRoot.add(this.city.group);
-    this.forest.setRail(this.rail);
     this.openDistricts.clear();
     this.plotsDef.forEach((p, i) => isPlotUnlocked(state, i) && this.openDistricts.add(p.district));
     this.station = new THREE.Group();
@@ -165,6 +198,13 @@ export class World {
     sm.castShadow = true;
     sm.receiveShadow = true;
     this.station.add(sm);
+    this.pile = new THREE.InstancedMesh(itemGeometry(this.itemKind), SHARED.vertexStd, PILE_COLS * PILE_ROWS * PILE_LAYERS);
+    this.pile.castShadow = true;
+    this.pile.frustumCulled = false;
+    this.pile.count = 0;
+    this.pileShown = -1;
+    this.station.add(this.pile);
+    this.stationHop = null;
     this.placeStation();
     this.levelRoot.add(this.station);
 
@@ -185,12 +225,20 @@ export class World {
     // Kereta
     this.train = new TrainView(this.itemKind);
     this.levelRoot.add(this.train.group);
+
+    // Tumpukan bahan di rel (jatuh saat gerbong muatan penuh)
+    this.railItems = new RailItemsView();
+    this.levelRoot.add(this.railItems.group);
+
+    // Truk pengantar bahan dari stasiun ke bangunan
+    this.trucks = new TruckFleet(state.levelIndex, this.itemKind);
+    this.levelRoot.add(this.trucks.group);
     this.cargoLabel = this.labels.create('cargo-label');
 
-    // Lingkungan di luar hutan
+    // Pulau di tengah laut
     const half = fieldFor(state.levelIndex).half + 0.5;
-    this.env = buildEnvironment(this.level.theme, palette, [{ minX: -half, maxX: half, minZ: -half, maxZ: half }], { minX: -0.5, maxX: 0.5, minZ: -0.5, maxZ: 0.5 }, null);
-    this.levelRoot.add(this.env.group);
+    this.sea = new SeaView(this.level);
+    this.levelRoot.add(this.sea.group);
 
     const ext = half + 2;
     this.sun.position.set(-10, 24, 13);
@@ -215,17 +263,67 @@ export class World {
     this.rig.update(10);
   }
 
-  /** Stasiun di titik rel jarak 0 (tengah sisi bawah); ikut maju & miring bersama rel (termasuk morph). */
-  private placeStation(): void {
-    this.track.pointAt(0, _v);
-    this.station.position.set(_v.x, 0, _v.z);
-    this.track.tangentAt(0, _v2);
-    this.station.rotation.y = Math.atan2(-_v2.z, _v2.x) - Math.PI;
+  private completePlot(plot: number, bonus: number): void {
+    const pv = this.plots[plot];
+    pv.markComplete();
+    pv.building.stageBounce(1.4);
+    const top = pv.topWorld(new THREE.Vector3());
+    this.effects.sparkle(top, 14);
+    this.effects.confettiBurst(top, 26);
+    this.float(`b${plot}`, bonus, 'float-sell', top.clone().setY(top.y + 0.6));
   }
 
+  /** Stasiun di titik rel jarak 0 (tengah sisi bawah); saat rel maju ia melompat ke posisi barunya. */
+  private placeStation(dt = 0): void {
+    this.track.pointAt(0, _v);
+    this.track.tangentAt(0, _v2);
+    const rot = Math.atan2(-_v2.z, _v2.x) - Math.PI;
+    const hop = this.stationHop;
+    if (!hop) {
+      this.station.position.set(_v.x, 0, _v.z);
+      this.station.rotation.y = rot;
+      return;
+    }
+    hop.t = Math.min(1, hop.t + dt / STATION_HOP);
+    const e = hop.t < 0.5 ? 2 * hop.t * hop.t : 1 - Math.pow(-2 * hop.t + 2, 2) / 2;
+    this.station.position.set(hop.x + (_v.x - hop.x) * e, Math.sin(hop.t * Math.PI) * 0.7, hop.z + (_v.z - hop.z) * e);
+    this.station.rotation.y = hop.rot + (rot - hop.rot) * e;
+    if (hop.t >= 1) this.stationHop = null;
+  }
+
+  /** Mulai lompatan stasiun bila titik rel jarak 0 berpindah. */
+  private hopStation(): void {
+    this.track.pointAt(0, _v);
+    const p = this.station.position;
+    if (Math.hypot(_v.x - p.x, _v.z - p.z) < 0.01) return;
+    this.stationHop = { x: p.x, z: p.z, rot: this.station.rotation.y, t: 0 };
+  }
+
+  /** Puncak tumpukan penyimpanan stasiun (tujuan muatan yang dibongkar). */
   private depot(out: THREE.Vector3): THREE.Vector3 {
     this.station.updateMatrixWorld();
-    return this.station.localToWorld(out.copy(DEPOT));
+    return this.station.localToWorld(out.set(STORAGE.x, STORAGE.y + 0.5, STORAGE.z));
+  }
+
+  /** Tumpukan balok di palet penyimpanan sesuai isi gudang (state.stock). */
+  private updatePile(stock: number): void {
+    const max = PILE_COLS * PILE_ROWS * PILE_LAYERS;
+    const n = Math.min(max, Math.ceil(stock / PILE_POINTS));
+    if (n === this.pileShown) return;
+    this.pileShown = n;
+    for (let i = 0; i < n; i++) {
+      const layer = Math.floor(i / (PILE_COLS * PILE_ROWS));
+      const k = i % (PILE_COLS * PILE_ROWS);
+      const cx = (k % PILE_COLS) - (PILE_COLS - 1) / 2;
+      const cz = Math.floor(k / PILE_COLS) - (PILE_ROWS - 1) / 2;
+      // Lapisan berselang-seling arah balok, seperti tumpukan kayu sungguhan.
+      const across = layer % 2 === 1;
+      _m.makeRotationY(across ? Math.PI / 2 : 0);
+      _m.setPosition(STORAGE.x + (across ? cz * 0.3 : cx * 0.3), STORAGE.y + 0.07 + layer * 0.11, STORAGE.z + (across ? cx * 0.22 : cz * 0.22));
+      this.pile.setMatrixAt(i, _m.multiply(_sc));
+    }
+    this.pile.count = n;
+    this.pile.instanceMatrix.needsUpdate = true;
   }
 
   private disposeLevel(): void {
@@ -238,8 +336,12 @@ export class World {
     this.city?.dispose();
     for (const p of this.plots) p.dispose();
     this.plots = [];
-    this.env?.dispose();
-    this.env = null;
+    this.sea?.dispose();
+    this.sea = null;
+    this.trucks?.dispose();
+    this.trucks = null;
+    this.railItems?.dispose();
+    this.railItems = null;
     this.effects.clear();
     this.scene.remove(this.levelRoot);
     this.levelRoot = new THREE.Group();
@@ -314,17 +416,37 @@ export class World {
   // ---------------------------------------------------------------------------
 
   handleEvents(events: GameEvent[], state: GameState): void {
+    let pickups = 0;
     let chips = 0;
     for (const e of events) {
       switch (e.type) {
         case 'cut': {
-          if (chips++ > 10) break; // batas keras partikel per frame
+          // Bahan keluar dari blok (sedikit demi sedikit selama digerus) dan terbang ke gerbong muatan.
           const kind = KINDS[fieldFor(state.levelIndex).kind[e.cell]];
+          if (e.felled) this.hooks.onCut(kind);
+          if (chips++ > 10) break; // batas keras partikel per frame
           const pos = this.forest.cellPos(e.cell, new THREE.Vector3());
-          this.effects.puff(pos, { count: 3, size: 0.2, spread: 1.4, up: 1.2, color: CHIP_COLORS[kind] ?? '#6ccf58', life: 0.5 });
+          this.effects.puff(pos, { count: e.felled ? 3 : 1, size: e.felled ? 0.2 : 0.14, spread: 1.4, up: 1.2, color: chipColor(kind, 0), life: 0.5 });
           const item: ItemKind = e.res === 'wood' ? 'wood' : e.res === 'stone' ? 'stone' : 'gem';
-          this.effects.fly(item, pos, this.train.wagonPosition(0, new THREE.Vector3()), { dur: 0.32, height: 0.9, scale: 0.8, getTo: () => this.train.wagonPosition(0, _v2), onLand: () => this.train.bumpWagon(0) });
-          this.hooks.onCut(kind);
+          this.effects.fly(item, pos, this.train.wagonPosition(0, new THREE.Vector3()), { dur: 0.32, height: 0.9, scale: e.felled ? 0.8 : 0.6, getTo: () => this.train.wagonPosition(0, _v2), onLand: () => this.train.bumpWagon(0) });
+          break;
+        }
+        case 'drop': {
+          // Gerbong penuh: balok kecil terbang dari pohon lalu jatuh menumpuk di rel.
+          const kind = KINDS[fieldFor(state.levelIndex).kind[e.cell]];
+          if (e.felled) this.hooks.onCut(kind);
+          if (chips++ > 10) break;
+          const pos = this.forest.cellPos(e.cell, new THREE.Vector3());
+          this.effects.puff(pos, { count: e.felled ? 3 : 1, size: e.felled ? 0.2 : 0.14, spread: 1.4, up: 1.2, color: chipColor(kind, 0), life: 0.5 });
+          const to = this.railItems!.landing(e.item, this.track, new THREE.Vector3());
+          this.effects.fly(e.item.res, pos, to, { dur: DROP_FLY, height: 0.8, scale: 0.6, onLand: () => this.effects.puff(to, { count: 2, size: 0.14, spread: 0.6, up: 0.4, life: 0.3, color: '#d9cfbf' }) });
+          this.railItems!.dropped(e.item);
+          break;
+        }
+        case 'pickup': {
+          if (pickups++ > 8) break;
+          const from = this.railItems!.landing(e.item, this.track, new THREE.Vector3());
+          this.effects.fly(e.item.res, from, this.train.wagonPosition(0, new THREE.Vector3()), { dur: 0.28, height: 0.6, scale: 0.6, getTo: () => this.train.wagonPosition(0, _v2), onLand: () => this.train.bumpWagon(0) });
           break;
         }
         case 'unload': {
@@ -342,32 +464,27 @@ export class World {
           break;
         }
         case 'deliver': {
+          // Truk tiba di depan kavling: bahan terbang dari baknya ke modul yang tumbuh, koin muncul.
           const pv = this.plots[e.plot];
           const targets = pv.building.scheduleModules(e.fromModule, e.toModule, 0.26);
-          const n = Math.min(e.amount, 8);
-          const from = this.depot(new THREE.Vector3());
-          for (let i = 0; i < n; i++) {
-            const to = targets[i % targets.length].clone();
-            this.effects.fly(this.itemKind, from, to, {
-              delay: 0.3 + i * 0.05,
-              dur: 0.5,
-              height: 2.2,
-              onLand: i === 0 ? () => this.effects.puff(to, { count: 3, size: 0.2, spread: 1.2 }) : undefined,
+          const f = this.plotsDef[e.plot].front;
+          const from = new THREE.Vector3(f.x, 0.35, f.z);
+          const n = Math.min(e.amount, 6);
+          for (let i = 0; i < n && targets.length; i++) {
+            const target = targets[i % targets.length].clone();
+            this.effects.fly(this.itemKind, from, target, {
+              delay: i * 0.05,
+              dur: 0.4,
+              height: 1.2,
+              onLand: i === 0 ? () => this.effects.puff(target, { count: 3, size: 0.2, spread: 1.2 }) : undefined,
             });
           }
           this.float(`d${e.plot}`, e.money, 'float-rent', pv.topWorld(new THREE.Vector3()));
           break;
         }
-        case 'plotComplete': {
-          const pv = this.plots[e.plot];
-          pv.markComplete();
-          pv.building.stageBounce(1.4);
-          const top = pv.topWorld(new THREE.Vector3());
-          this.effects.sparkle(top, 14);
-          this.effects.confettiBurst(top, 26);
-          this.float(`b${e.plot}`, e.bonus, 'float-sell', top.clone().setY(top.y + 0.6));
+        case 'plotComplete':
+          this.completePlot(e.plot, e.bonus);
           break;
-        }
         case 'projectComplete': {
           const b = islandBounds(this.level);
           for (let i = 0; i < 4; i++) {
@@ -391,10 +508,10 @@ export class World {
           break;
         case 'railGrow': {
           const to = railOf(state);
-          this.track.startMorph(this.rail.track, to.track, railMapping(to, this.rail), RAIL_MORPH);
+          this.track.setRail(to);
+          this.hopStation();
           this.rail = to;
           this.city.setRail(to);
-          this.forest.setRail(to);
           break;
         }
         case 'harvest': {
@@ -485,8 +602,17 @@ export class World {
     const speed = moving ? trainSpeed(state) * rt.drive.v * 0.3 : 0;
     this.syncTrain(state, dt, speed, 1 + rt.drive.v * 0.3, rt.targets);
     if (moving) this.cutSparks(state, rt, dt);
-    this.forest.update(dt, state);
+    // Pucuk/tajuk/pecahan batu yang terlepas saat blok turun satu tahap.
+    const drops = this.forest.update(dt, state);
+    for (let i = 0; i < drops.length && i < 6; i++) {
+      const d = drops[i];
+      this.forest.cellPos(d.cell, _v).setY(d.y);
+      this.effects.puff(_v, { count: 5, size: 0.17, spread: 1.6, up: 1.7, life: 0.55, color: chipColor(d.kind, d.stage) });
+    }
     this.city.update(dt);
+    this.sea?.update(dt);
+    this.trucks?.update(dt, state.trucks);
+    this.railItems?.update(dt, state.railItems, this.track);
 
     // Asap lokomotif
     this.smokeTimer -= dt;
@@ -516,8 +642,9 @@ export class World {
       for (let k = 1; k <= 8; k++) l.setClass(`lv${k}`, k === lv);
     });
 
-    // Stasiun ikut maju bersama rel; bergoyang saat menerima muatan
-    this.placeStation();
+    // Stasiun ikut maju bersama rel; bergoyang saat menerima muatan; tumpukan gudang ikut isinya
+    this.placeStation(dt);
+    this.updatePile(state.stock);
     this.stationBounce = Math.max(0, this.stationBounce - dt * 3);
     const sb = Math.sin(this.stationBounce * Math.PI) * 0.08;
     this.station.scale.set(1 + sb * 0.5, 1 - sb + sb * 1.4, 1 + sb * 0.5);

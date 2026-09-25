@@ -17,21 +17,26 @@ import {
   STATION_D,
   trackOf,
   trainSpeed,
+  truckCapacity,
+  truckCount,
 } from './economy';
 import type { EventSink } from './events';
-import { enclosedBlocks, isPlotInside, railMapping, updateRail } from './rail';
+import { deliveryRoute } from './layout';
+import { enclosedBlocks, isPlotInside, updateRail, type RailSpan } from './rail';
 import { computeCrossings } from './track';
-import type { GameState, Runtime, Vec2 } from './types';
-import { cellPoints, fieldFor, forCellsInRadius, KINDS, type Field } from './worldgen';
+import type { GameState, RailItem, Runtime, Vec2 } from './types';
+import { fieldFor, forCellsInRadius, KINDS, releasedUnits, remainingPoints, type Field } from './worldgen';
 
-/** HP sisa blok yang sudah tumbang tapi belum muat di gerbong muatan (menunggu ruang). */
-const HOLD_HP = 0.01;
 /** Di bawah laju ini kereta dianggap diam: gerinda tidak memotong. */
 const MOVING = 0.05;
+/** Kelonggaran rel yang dijaga di depan lokomotif & di belakang pemotong terakhir (setengah badan gerbong). */
+const TRAIN_MARGIN = 0.6;
+/** Tiap jarak tempuh sejauh ini, lahan yang tertunda di belakang kereta diperiksa lagi. */
+const RAIL_CHECK = 0.25;
 
 /**
  * Satu langkah simulasi (sub-step kecil, maks BALANCE.maxStepDt).
- * Urutan: kontrol → gerak kereta (+ bongkar di stasiun) → pemotong → rel maju bila ada blok hancur.
+ * Urutan: kontrol → gerak kereta (+ bongkar di stasiun) → pemotong → rel maju di belakang kereta.
  * Tanpa input pemain kereta diam dan tidak ada yang terpotong.
  */
 export function step(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
@@ -41,13 +46,21 @@ export function step(state: GameState, rt: Runtime, dt: number, events: EventSin
   if (state.completed) return;
   state.stats.levelTime += dt;
   state.stats.totalTime += dt;
+  // Truk kota tetap bolak-balik walau kereta berhenti.
+  updateTrucks(state, dt, events);
+  if (state.completed) return;
   if (rt.drive.v < MOVING) {
     rt.fullTime = cargoTotal(state.train.cargo) >= capacity(state) ? rt.fullTime + dt : 0;
     return;
   }
-  moveTrain(state, rt, dt, events);
+  rt.railCheck += moveTrain(state, rt, dt, events);
   if (state.completed) return;
-  if (cut(state, rt, dt, events)) growRail(state, events);
+  // Lahan yang tertunda di dekat kereta diterapkan begitu kereta sudah lewat; diperiksa saat
+  // ada blok tumbang atau tiap RAIL_CHECK jarak tempuh (bukan tiap sub-step, supaya ringan di HP).
+  if (cut(state, rt, dt, events) || rt.railCheck >= RAIL_CHECK) {
+    rt.railCheck = 0;
+    growRail(state, events);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,12 +107,37 @@ export function cutterDistance(state: GameState, k: number): number {
   return trackOf(state).wrap(state.train.distance - (k + 2) * BALANCE.wagonSpacing);
 }
 
-function moveTrain(state: GameState, rt: Runtime, dt: number, events: EventSink): void {
+/** Majukan kereta; mengembalikan jarak tempuhnya. */
+function moveTrain(state: GameState, rt: Runtime, dt: number, events: EventSink): number {
   const track = trackOf(state);
   const move = Math.min(trainSpeed(state) * rt.drive.v * dt, track.length * 0.5);
   const station = [{ d: STATION_D, data: null }];
+  const cargoFrom = cargoDistance(state);
   if (computeCrossings(state.train.distance, move, track.length, station).length) unload(state, events);
   state.train.distance = track.wrap(state.train.distance + move);
+  pickUp(state, cargoFrom, move, events);
+  return move;
+}
+
+/** Gerbong muatan memungut tumpukan bahan di rel yang dilewatinya, selama masih muat. */
+function pickUp(state: GameState, from: number, move: number, events: EventSink): void {
+  if (!state.railItems.length) return;
+  const cap = capacity(state);
+  const cargo = state.train.cargo;
+  const crossed = computeCrossings(
+    from,
+    move,
+    trackOf(state).length,
+    state.railItems.map((item) => ({ d: item.d, data: item })),
+  );
+  const taken = new Set<RailItem>();
+  for (const { data: item } of crossed) {
+    if (cargoTotal(cargo) + item.amount > cap) continue;
+    cargo[item.res] += item.amount;
+    taken.add(item);
+    events.push({ type: 'pickup', item });
+  }
+  if (taken.size) state.railItems = state.railItems.filter((it) => !taken.has(it));
 }
 
 // ---------------------------------------------------------------------------
@@ -139,8 +177,10 @@ function pickTarget(state: GameState, f: Field, p: Vec2, o: Vec2, g: Vec2, R: nu
 
 /**
  * Tiap pemotong punya gerinda horizontal yang menempel di sisi kirinya (arah hutan) dan menggerus
- * SATU blok yang disentuhnya sampai tumbang. Blok tumbang masuk gerbong muatan utuh — bila tidak
- * muat, blok ditahan di ambang tumbang sampai muatan dibongkar, jadi tidak ada bahan yang hilang.
+ * SATU blok yang disentuhnya sampai tumbang, walaupun gerbong muatan sudah penuh. Bahan keluar
+ * sedikit demi sedikit seiring kerusakan (releasedUnits) dan masuk gerbong muatan — bila tidak
+ * muat, bahannya jatuh ke rel di bawah pemotong (state.railItems) dan dipungut gerbong muatan saat
+ * melintas lagi, jadi tidak ada bahan yang hilang.
  * Mengembalikan true bila ada blok yang tumbang (rel perlu dihitung ulang).
  */
 function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): boolean {
@@ -150,15 +190,9 @@ function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): bool
   const cargo = state.train.cargo;
   const cutters = state.train.cutters;
   if (rt.targets.length !== cutters.length) rt.targets = cutters.map(() => -1);
-  if (cargoTotal(cargo) >= cap) {
-    rt.fullTime += dt;
-    rt.targets.fill(-1);
-    return false;
-  }
   const p = { x: 0, z: 0 };
   const o = { x: 0, z: 0 };
   const g = { x: 0, z: 0 };
-  let stalled = false;
   let felled = false;
   cutters.forEach((lvl, k) => {
     const d = cutterDistance(state, k);
@@ -175,22 +209,32 @@ function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): bool
     }
     if (t < 0) return;
     rt.cutHeat = 1;
-    state.blocks[t] -= cutterDps(lvl) * dt;
-    if (state.blocks[t] > 0) return;
     const def = BALANCE.blocks[KINDS[f.kind[t]]];
-    if (cap - cargoTotal(cargo) < def.amount) {
-      state.blocks[t] = HOLD_HP;
-      stalled = true;
-      return;
+    const before = state.blocks[t];
+    state.blocks[t] -= cutterDps(lvl) * dt;
+    const down = state.blocks[t] <= 0;
+    if (down) {
+      state.blocks[t] = 0;
+      state.stats.totalCut++;
+      rt.targets[k] = -1;
+      felled = true;
     }
-    cargo[def.res] += def.amount;
-    state.blocks[t] = 0;
-    state.stats.totalCut++;
-    rt.targets[k] = -1;
-    felled = true;
-    events.push({ type: 'cut', cell: t, cutter: k, res: def.res, amount: def.amount });
+    // Bahan keluar sedikit demi sedikit selama digerus, bukan hanya saat blok habis.
+    const units = releasedUnits(f, t, state.blocks[t]) - releasedUnits(f, t, before);
+    if (units <= 0) return;
+    const toCargo = Math.max(0, Math.min(units, cap - cargoTotal(cargo)));
+    if (toCargo > 0) {
+      cargo[def.res] += toCargo;
+      events.push({ type: 'cut', cell: t, cutter: k, res: def.res, amount: toCargo, felled: down });
+    }
+    if (units > toCargo) {
+      // Gerbong penuh: sisanya jatuh ke rel di bawah pemotong, dipungut di putaran berikutnya.
+      const item: RailItem = { d, res: def.res, amount: units - toCargo };
+      state.railItems.push(item);
+      events.push({ type: 'drop', cell: t, cutter: k, item, felled: down });
+    }
   });
-  rt.fullTime = stalled || cargoTotal(cargo) >= cap ? rt.fullTime + dt : 0;
+  rt.fullTime = cargoTotal(cargo) >= cap ? rt.fullTime + dt : 0;
   return felled;
 }
 
@@ -198,26 +242,35 @@ function cut(state: GameState, rt: Runtime, dt: number, events: EventSink): bool
 // Rel maju
 // ---------------------------------------------------------------------------
 
+/** Bagian rel yang ditempati kereta: pemotong terakhir sampai hidung lokomotif. */
+export function trainSpan(state: GameState): RailSpan {
+  const back = (state.train.cutters.length + 1) * BALANCE.wagonSpacing + TRAIN_MARGIN;
+  return { from: trackOf(state).wrap(state.train.distance - back), length: back + TRAIN_MARGIN };
+}
+
 /**
- * Hitung ulang rel setelah blok hancur. Bila bentuknya berubah, posisi kereta dipetakan ke rel
- * baru (bagian rel yang sama tetap di tempat), blok yang kini terkurung di dalam rel dibongkar
- * otomatis ke gudang, kavling yang kini di dalam rel terbuka, dan bahan gudang langsung dipasang.
+ * Hitung ulang rel setelah blok hancur / kereta bergerak. Rel hanya berubah di bagian yang tidak
+ * ditempati kereta (lahan di dekat kereta menunggu kereta lewat), jadi kereta tidak pernah
+ * tergeser. Bila bentuknya berubah, jarak kereta dipetakan ke rel baru, blok yang kini terkurung
+ * di dalam rel dibongkar otomatis ke gudang, kavling yang kini di dalam rel terbuka, dan bahan
+ * gudang langsung dipasang. `avoidTrain = false` menerapkan semua lahan sekaligus.
  */
-export function growRail(state: GameState, events: EventSink): boolean {
-  const ch = updateRail(state);
+export function growRail(state: GameState, events: EventSink, avoidTrain = true): boolean {
+  const ch = updateRail(state, avoidTrain ? trainSpan(state) : undefined);
   if (!ch) return false;
-  state.train.distance = ch.to.track.wrap(railMapping(ch.from, ch.to).map(state.train.distance));
+  state.train.distance = ch.to.track.wrap(ch.map.map(state.train.distance));
+  for (const item of state.railItems) item.d = ch.to.track.wrap(ch.map.map(item.d));
   events.push({ type: 'railGrow' });
   const f = fieldFor(state.levelIndex);
   for (const c of enclosedBlocks(ch.to, state.blocks)) {
-    const points = cellPoints(f, c);
+    const points = remainingPoints(f, c, state.blocks[c]);
     state.blocks[c] = 0;
     state.stock += points;
     state.stats.totalCut++;
     events.push({ type: 'harvest', cell: c, points });
   }
   for (let p = 0; p < state.plots.length; p++) if (!isPlotInside(ch.from, p) && isPlotInside(ch.to, p)) events.push({ type: 'plotOpen', plot: p });
-  install(state, events);
+  dispatchTrucks(state);
   return true;
 }
 
@@ -225,7 +278,7 @@ export function growRail(state: GameState, events: EventSink): boolean {
 // Stasiun & kota
 // ---------------------------------------------------------------------------
 
-/** Stasiun: seluruh muatan dibongkar ke gudang (tidak ada yang dijual), lalu dipasang ke kota. */
+/** Stasiun: seluruh muatan dibongkar ke penyimpanan stasiun (tidak ada yang dijual), lalu truk mengangkutnya. */
 export function unload(state: GameState, events: EventSink): void {
   const points = cargoPoints(state.train.cargo);
   if (points <= 0) return;
@@ -233,21 +286,79 @@ export function unload(state: GameState, events: EventSink): void {
   state.train.cargo = { wood: 0, stone: 0, gem: 0 };
   state.stock += points;
   events.push({ type: 'unload', cargo, points });
-  install(state, events);
+  dispatchTrucks(state);
+}
+
+// ---------------------------------------------------------------------------
+// Truk pengantar: penyimpanan stasiun → bangunan → kembali
+// ---------------------------------------------------------------------------
+
+/** Jarak penyimpanan (titik berangkat truk) dari rel stasiun ke arah kota. */
+export const STORAGE_BACK = 1.4;
+
+/** Poin bahan yang sedang dibawa truk ke kavling `plot`. */
+function inTransit(state: GameState, plot: number): number {
+  let sum = 0;
+  for (const t of state.trucks) if (t.plot === plot) sum += t.load;
+  return sum;
 }
 
 /**
- * Pasang bahan gudang ke bangunan terbuka yang belum jadi (isi-dulu, urut kavling).
- * Setiap poin yang terpasang langsung jadi koin; bangunan yang selesai memberi bonus.
+ * Berangkatkan truk yang menganggur selama penyimpanan berisi dan masih ada bangunan terbuka yang
+ * butuh bahan (urut kavling: rumah dulu, gedung besar menjadi penutup distrik).
  */
-export function install(state: GameState, events: EventSink): void {
-  for (let p = 0; p < state.plots.length && state.stock > 0; p++) {
-    if (!isPlotUnlocked(state, p) || isPlotComplete(state, p)) continue;
-    const project = plotProject(state, p);
-    const built = state.plots[p];
-    const drop = Math.min(state.stock, plotTarget(state, p) - built);
+export function dispatchTrucks(state: GameState): void {
+  const cap = truckCapacity(state);
+  const count = truckCount(state);
+  const start = { x: 0, z: trackOf(state).pointAt(STATION_D).z - STORAGE_BACK };
+  let p = 0;
+  while (state.trucks.length < count && state.stock > 0) {
+    let need = 0;
+    for (; p < state.plots.length; p++) {
+      if (!isPlotUnlocked(state, p) || isPlotComplete(state, p)) continue;
+      need = plotTarget(state, p) - state.plots[p] - inTransit(state, p);
+      if (need > 0) break;
+    }
+    if (p >= state.plots.length) return;
+    const load = Math.min(cap, state.stock, need);
+    state.stock -= load;
+    const route = deliveryRoute(state.levelIndex, p, start);
+    let length = 0;
+    for (let i = 1; i < route.length; i++) length += Math.hypot(route[i].x - route[i - 1].x, route[i].z - route[i - 1].z);
+    state.trucks.push({ plot: p, load, startZ: start.z, length: Math.max(0.5, length), s: 0 });
+  }
+}
+
+/** Majukan truk; yang tiba di kavling membongkar muatannya, yang kembali ke stasiun siap berangkat lagi. */
+function updateTrucks(state: GameState, dt: number, events: EventSink): void {
+  if (!state.trucks.length) return;
+  let freed = false;
+  for (const t of state.trucks) {
+    t.s += BALANCE.truck.speed * dt;
+    if (t.load > 0 && t.s >= t.length) {
+      const load = t.load;
+      t.load = 0;
+      deliver(state, t.plot, load, events);
+      if (state.completed) return;
+    }
+  }
+  const before = state.trucks.length;
+  state.trucks = state.trucks.filter((t) => t.s < t.length * 2);
+  freed = state.trucks.length < before;
+  if (freed) dispatchTrucks(state);
+}
+
+/**
+ * Truk tiba: bahan terpasang ke kavling. Setiap poin yang terpasang langsung jadi koin; bangunan
+ * yang selesai memberi bonus; level selesai saat semua bangunan jadi dan hutan bersih.
+ */
+function deliver(state: GameState, p: number, load: number, events: EventSink): void {
+  const project = plotProject(state, p);
+  const built = state.plots[p];
+  const drop = Math.min(load, plotTarget(state, p) - built);
+  state.stock += load - drop;
+  if (drop > 0) {
     state.plots[p] = built + drop;
-    state.stock -= drop;
     const money = buildCoins(state, drop);
     state.money += money;
     state.stats.totalBuilt += drop;

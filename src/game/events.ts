@@ -1,8 +1,13 @@
-import type { Cargo, Resource } from './types';
+import type { Cargo, RailItem, Resource } from './types';
 
 /** Event yang dipancarkan simulasi/aksi agar render, audio, dan UI bisa bereaksi. */
 export type GameEvent =
-  | { type: 'cut'; cell: number; cutter: number; res: Resource; amount: number }
+  /** Bahan keluar dari blok yang digerus dan masuk gerbong muatan; `felled` = blok habis. */
+  | { type: 'cut'; cell: number; cutter: number; res: Resource; amount: number; felled: boolean }
+  /** Bahan keluar saat gerbong muatan tidak muat: jatuh ke rel sebagai `item`. */
+  | { type: 'drop'; cell: number; cutter: number; item: RailItem; felled: boolean }
+  /** Gerbong muatan memungut tumpukan bahan di rel yang dilewatinya. */
+  | { type: 'pickup'; item: RailItem }
   /** Muatan dibongkar di stasiun; `points` masuk gudang lalu langsung dipasang bila ada bangunan terbuka. */
   | { type: 'unload'; cargo: Cargo; points: number }
   | {
@@ -21,7 +26,7 @@ export type GameEvent =
   | { type: 'merge'; a: number; b: number; level: number }
   | { type: 'speed'; level: number }
   | { type: 'capacity'; level: number }
-  /** Rel maju mengikuti baris hutan terdepan (bentuk baru: railOf(state)). */
+  /** Rel maju di belakang kereta (bentuk baru: railOf(state)). */
   | { type: 'railGrow' }
   /** Blok terkurung di dalam rel dibongkar otomatis; bahannya masuk gudang. */
   | { type: 'harvest'; cell: number; points: number }

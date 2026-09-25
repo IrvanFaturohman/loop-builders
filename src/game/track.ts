@@ -5,8 +5,6 @@ export interface TrackShape {
   /** Titik pertama harus berada di tengah ruas lurus (jarak 0 lintasan). */
   corners: [number, number][];
   radius: number;
-  /** Radius per sudut (opsional; menimpa `radius` untuk sudut itu). */
-  radii?: number[];
 }
 
 /**
@@ -84,7 +82,7 @@ export class TrackPath {
       // Ruas dibagi dua dengan sudut tetangga, kecuali tetangganya titik awal (tanpa lengkung).
       const availIn = (i - 1 + n) % n === 0 ? lenIn : lenIn * 0.5;
       const availOut = (i + 1) % n === 0 ? lenOut : lenOut * 0.5;
-      const r = Math.min(def.radii?.[i] ?? def.radius, Math.min(availIn, availOut) / Math.tan(theta / 2));
+      const r = Math.min(def.radius, Math.min(availIn, availOut) / Math.tan(theta / 2));
       const t = r * Math.tan(theta / 2);
       const t1 = { x: p.x - u.x * t, z: p.z - u.z * t };
       const t2 = { x: p.x + w.x * t, z: p.z + w.z * t };
@@ -295,10 +293,6 @@ export class StageMapping {
       }
     }
     return 0;
-  }
-
-  inverse(): StageMapping {
-    return new StageMapping(this.toKeys, this.fromKeys);
   }
 }
 
